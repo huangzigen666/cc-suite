@@ -1,7 +1,8 @@
 ---
 name: claude-code-conventions
 description: "Canonical reference for Claude Code plugin artifact schemas, hook events, frontmatter fields, and naming conventions. Used to inject domain knowledge into Codex audit prompts. Run /cc-suite:refresh-knowledge to update from latest docs."
-version: 0.2.0
+metadata:
+  version: 0.2.0
 ---
 
 # Claude Code Plugin Conventions Reference

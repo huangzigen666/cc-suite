@@ -1,7 +1,8 @@
 ---
 name: vocabulary
 description: "Use when writing, reviewing, or naming any cc-suite artifact — pick the canonical noun or verb from this registry rather than coining a synonym. Loaded by NLPM's scorer and checker when R51 is enabled in .claude/nlpm.local.md."
-version: 0.1.0
+metadata:
+  version: 0.1.0
 ---
 
 # cc-suite Domain Vocabulary
