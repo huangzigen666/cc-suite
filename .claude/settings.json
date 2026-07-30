@@ -1,5 +1,6 @@
 {
   "enabledPlugins": {
-    "nlpm@xiaolai": true
+    "nlpm@xiaolai": true,
+    "cc-suite@xiaolai": true
   }
 }
