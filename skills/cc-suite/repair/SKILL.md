@@ -1,12 +1,13 @@
 ---
 name: repair
-description: "Non-interactive re-run of all cc-suite bridge and registration scripts. No questions asked — idempotent escalation step after the diagnose skill finds issues it could not fix. Skill counterpart to /cc-suite:repair."
-version: 0.2.7
+description: "Preview and, after explicit approval, re-run all cc-suite bridge and registration scripts. Idempotent escalation step after the diagnose skill finds issues it could not fix. Skill counterpart to /cc-suite:repair."
+metadata:
+  version: 0.2.7
 ---
 
 # Repair
 
-Re-run every cc-suite setup script in sequence without prompts. All scripts are idempotent — correct artifacts are left alone, missing or broken ones are recreated.
+Preview every cc-suite setup script and its write scope, then re-run the approved sequence. All scripts are intended to be idempotent, but idempotency does not replace user approval for project or user-level configuration changes.
 
 ## When to Use
 
@@ -17,6 +18,26 @@ Re-run every cc-suite setup script in sequence without prompts. All scripts are 
 If repair still leaves issues, the next step is `/cc-suite:init` in a Claude Code session (full interactive re-initialization).
 
 ## Workflow
+
+### Step 0: Preview scope and confirm
+
+Before running any setup script, display this plan with resolved paths:
+
+| Script | Potential write scope |
+|--------|-----------------------|
+| `init.sh` | Project `AGENTS.md`, `CLAUDE.md`, `.agents/`, `.gitignore`, and cc-suite scaffolding |
+| `bridge_skills.sh` | Project `.claude/skills/cc-suite/` and `.agents/skills` symlinks |
+| `mcp_codex.sh` | Project `.mcp.json` |
+| `mcp_claude.sh` | User-level `~/.codex/config.toml` |
+| `bridge_mcp.sh` | User-level `~/.codex/config.toml` plus generated project `.agents/mcp_config.json` |
+| `bridge_hooks.py` | Project `.codex/hooks.json` |
+| `bridge_tools.py` | Enabled external coding-tool registries described by `.cc-suite.md` |
+
+Show the exact commands listed in Steps 1–6b and ask:
+
+`Run the full repair with these project and user-level changes? (yes / show commands only / cancel)`
+
+Proceed only after an explicit `yes` to this displayed scope. The original repair request is not sufficient approval. If the user chooses `show commands only` or `cancel`, do not modify anything.
 
 ### Step 1: Bridge init
 

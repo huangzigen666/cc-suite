@@ -1,7 +1,8 @@
 ---
 name: diagnose
 description: "Diagnose the cc-suite setup in the current project. Runs the full health check, explains every issue, and fixes what can be fixed automatically. Skill counterpart to /cc-suite:diagnose."
-version: 0.2.6
+metadata:
+  version: 0.2.6
 ---
 
 # Diagnose
@@ -80,15 +81,23 @@ If no issues: report healthy and stop.
 
 ### Step 4: Offer to fix
 
-Ask:
+Before asking, display every proposed fix with:
 
-```
-Fix all auto-fixable issues now? (yes / show commands only / cancel)
-```
+- the issue number;
+- the exact command or file edit;
+- every project-level path it may change;
+- every user-level path it may change, especially `~/.codex/config.toml`;
+- whether it removes or replaces a symlink.
+
+Then ask the user to approve all listed fixes or specific issue numbers:
+
+`Apply these fixes? (all / issue numbers / show commands only / cancel)`
+
+Do not treat the original diagnose request as approval to modify files. Do not run any fix until the user explicitly approves the displayed scope.
 
 ### Step 5: Apply fixes
 
-For each fixable issue, run the corresponding script:
+Run only the issue numbers approved in Step 4. For each approved fixable issue, run the corresponding script:
 
 | Issue | Fix |
 |-------|-----|
