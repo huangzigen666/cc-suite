@@ -49,6 +49,7 @@ import {
 } from "./lib/state.mjs";
 import { resolveWorkspaceRoot } from "./lib/workspace.mjs";
 import { withDelegationBoundary } from "./lib/delegation-boundary.mjs";
+import { withConstitutionReminder } from "./lib/constitution-reminder.mjs";
 
 const DEFAULT_TIMEOUT_MS = 15 * 60 * 1000; // 15 minutes — matches codex-runner
 const HEARTBEAT_MS = 30 * 1000;
@@ -184,7 +185,14 @@ function buildAgyArgs(args) {
   // own skills for delegating to Claude Code. Its skill schema has no
   // allow_implicit_invocation switch, so the prompt is the only place the
   // hand-back can be refused. See lib/delegation-boundary.mjs.
-  agyArgs.push("-p", withDelegationBoundary(args.prompt));
+  //
+  // agy also does not load AGENTS.md/GEMINI.md in `-p` mode despite claiming to
+  // (see lib/constitution-reminder.mjs for the confirmed test), so its row in
+  // AGENTS_CONSTITUTION.md has to ride along in the prompt too.
+  agyArgs.push(
+    "-p",
+    withDelegationBoundary(withConstitutionReminder(args.prompt))
+  );
 
   return agyArgs;
 }
