@@ -1,6 +1,8 @@
-# Dev note: diagnosing the agy region block, and rolling back agy credentials
+# Dev note: the agy "unsupported location" failure, and rolling back agy credentials
 
 Date: 2026-08-18
+Status: **root cause unresolved** — see "Conclusion". The value here is the
+ruled-out list and the reusable checks, not an answer.
 
 ## Context
 
@@ -70,21 +72,65 @@ A datacenter ASN being rejected would be unsurprising. A consumer mobile-carrier
 ASN in the US being rejected identically is the discriminating observation: the
 region decision is not being made from the egress IP.
 
-## Conclusion
+**4. The account's own country is a supported one.** Checked directly in Google
+Payments settings: the account country is **United States**. This kills the
+follow-on hypothesis that the gate reads the account's sticky country setting
+rather than the request IP — both are US, and the call is still refused.
 
-For `authMethod=consumer`, the region gate is evaluated against the **Google
-Account's own country setting**, not the request's egress IP. That setting is
-sticky and derived from account history, so no proxy or VPN change moves it.
+**5. It is not model-specific.** `agy models` lists non-Gemini backends too.
+Running the same prompt through `claude-sonnet-4-6` and `gpt-oss-120b-medium`
+produces the identical `User location is not supported`, so the gate sits at the
+Antigravity service layer, ahead of any model backend.
 
-This also explains the split behavior. Model discovery and OAuth are not
-region-gated; only inference is. An `agy models` that works therefore proves
-nothing about whether agent runs will work.
+**6. Neither an API key nor a missing GCP project explains it.** A stray
+`GEMINI_API_KEY` in the environment is irrelevant (`env -u GEMINI_API_KEY`
+changes nothing). `GOOGLE_CLOUD_PROJECT` is simply not read by agy — the log
+still shows `quotaProject=` empty — and supplying a project by hand at the API
+level is accepted (`"gcpManaged": true`) without changing agy's behavior.
 
-Remedies, in increasing order of cost:
+## Conclusion — unresolved
 
-1. Authenticate `agy` with a Google account whose region is supported.
-2. Move to paid Cloud Code Assist / Vertex AI with a GCP project, where
-   eligibility follows the project rather than the personal account.
+**The root cause is not established.** Everything reachable from the host has
+been ruled out: egress path, egress country, egress ASN class, account country,
+locale and timezone, stray API key, GCP project binding, and model choice. The
+account additionally holds an active Google One AI Premium subscription.
+
+What is left is the Antigravity service layer refusing this account for a reason
+Google does not report accurately — the emitted message names a location, but no
+location signal available to the client accounts for it.
+
+One caveat worth recording rather than hiding: the non-datacenter exit
+(`174.236.228.238`, Verizon) was tested only once, and its IP check and the agy
+run were separate commands about a minute apart. Later attempts to reselect a
+non-hosting exit failed — the proxy client kept returning the same WebNX address
+regardless of node or mode changes — so that single sample could not be
+reconfirmed with a tighter check-run-check sandwich. It is evidence against the
+IP hypothesis, not a refutation of it.
+
+### A misleading side-quest, recorded so it is not repeated
+
+Calling `cloudcode-pa.googleapis.com/v1internal:generateContent` directly with
+the same OAuth token returns a *different* error:
+
+```text
+403 PERMISSION_DENIED   reason: SUBSCRIPTION_REQUIRED
+domain: cloudaicompanion.googleapis.com
+"You do not have a valid license of this product." (#3501)
+```
+
+and `loadCodeAssist` reports `free-tier` as `UNSUPPORTED_CLIENT` with only a
+GCP-managed `standard-tier` allowed. This looks like the answer and is not:
+that surface is **Gemini Code Assist**, a GCP product with its own licensing,
+which a consumer Google One AI Premium subscription does not grant and which agy
+does not use for consumer auth. Do not treat those responses as evidence about
+agy's own path.
+
+### If this is picked up again
+
+The untested variable is a genuinely different network egress — a different
+provider entirely, or running agy from a host outside the restricted network —
+not another node inside the same proxy client. Everything cheaper has been
+tried.
 
 ## Distinguishing the two failure modes
 
