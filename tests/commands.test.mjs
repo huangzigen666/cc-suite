@@ -40,6 +40,7 @@ const COMMANDS = [
   "init",
   "agy-preflight",
   "agy",
+  "agy-suggest",
   "grok-preflight",
   "grok",
   "bridge-tools",
@@ -86,11 +87,16 @@ test("sync-mcp documents the Claude-to-Codex bridge", () => {
   assert.ok(content.includes("restart Codex"));
 });
 
-test("agy command uses the Antigravity runner without an effort picker", () => {
+test("agy command requires explicit identity and the verified R16 release wrapper", () => {
   const content = readCommand("agy");
-  assert.ok(content.includes("scripts/agy-runner.mjs"));
   assert.ok(content.includes("scripts/agy-preflight.sh"));
-  assert.ok(content.includes("Do not ask for a reasoning-effort setting"));
+  assert.ok(content.includes("--project default-cli-project"));
+  assert.ok(content.includes("model slug"));
+  assert.ok(content.includes("scripts/agy-public-runner.mjs"));
+  assert.ok(content.includes("r16_external_workspace_write_verified"));
+  assert.ok(content.includes("runtimeResourcesCleaned"));
+  assert.ok(content.includes("Reject `--background`"));
+  assert.ok(!content.includes("--dangerously-skip-permissions"));
 });
 
 test("shared partials have user-invocable: false", () => {

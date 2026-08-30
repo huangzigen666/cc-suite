@@ -90,6 +90,30 @@ test("renderJobResult renders raw output with thread ID", () => {
   assert.ok(output.includes("/continue t-abc"));
 });
 
+test("renderJobResult reports surviving workspace changes", () => {
+  const job = { id: "j-agy", kind: "agy", status: "stalled" };
+  const stored = {
+    rawOutput: "Partial AGY output",
+    workspaceChanges: [" M tracked.txt", "?? partial.txt"],
+  };
+  const output = renderJobResult(job, stored);
+  assert.ok(output.includes("Workspace changes"));
+  assert.ok(output.includes("M tracked.txt"));
+  assert.ok(output.includes("?? partial.txt"));
+});
+
+test("renderJobResult reports recovered AGY workspace changes", () => {
+  const job = { id: "j-aborted", kind: "agy", status: "aborted" };
+  const stored = {
+    error: "Runner exited without cleanup",
+    errorCode: "AGY_RUNNER_ABORTED",
+    workspaceChanges: ["?? recovered.txt"],
+  };
+  const output = renderJobResult(job, stored);
+  assert.ok(output.includes("AGY_RUNNER_ABORTED"));
+  assert.ok(output.includes("recovered.txt"));
+});
+
 test("renderJobResult handles missing raw output", () => {
   const job = {
     id: "j-2",

@@ -1,0 +1,88 @@
+{
+  "schemaVersion": 1,
+  "round": "R14",
+  "status": "blocked-no-go",
+  "evidenceCompleteness": "partial-observation-only",
+  "promotionEligible": false,
+  "oneBoundCapsuleRun": false,
+  "oauthAttempted": false,
+  "realModelCallAttempted": false,
+  "tokenRefreshAttempted": false,
+  "chaosTeardownComplete": false,
+  "independentSecurityReviewComplete": false,
+  "artifactLogsRetained": false,
+  "agyVersion": "1.1.11",
+  "agyBinarySha256": "e9202092a2a1150a5b74c20a0bd1ec4ef006f93461f61cdc8c7302e4213e1168",
+  "capsuleImage": {
+    "reference": "cc-suite/agy-r14-capsule:1.1.11",
+    "indexDigest": "sha256:97f32d395735445e4157793d8258d5e84787e9dd4d60c637da05ff0ad36bb815",
+    "arm64ManifestDigest": "sha256:ed0e9126c7ebef384a98cb9cde55ee7957b27fd20ce5350bffd7960537da5d71"
+  },
+  "proxyImage": {
+    "reference": "cc-suite/agy-r14-egress:probe",
+    "indexDigest": "sha256:d82c9d3a6758bfe105b85e57c1eec8c7e29c39444cfd2b877c77623d4b716ca4",
+    "arm64ManifestDigest": "sha256:8b03382fa6fba7e98861ae227e51a2c21b7de117b340367e1e16ac6b6f52f604"
+  },
+  "successfulProbe": {
+    "profileHash": "sha256:4fcc785574f9dc0c4ac6a200eaa7e699740b215aa8579add8a3a3de728475cb2",
+    "proxyPolicyHash": "sha256:0f56a36ddd2bb729d5e9be8caf9c8d27809c85b3454dc8ca91d8dc1dfbee0f26",
+    "startedAt": "2026-08-10T19:36:42.988Z",
+    "finishedAt": "2026-08-10T19:36:45.001Z",
+    "workloadExitCode": 0,
+    "lifecycleAttributed": true
+  },
+  "observations": [
+    "quarantine-blocked-direct-egress-before-handoff",
+    "bootstrap-published-on-host-loopback-only",
+    "bootstrap-ingress-removed-before-workload",
+    "final-firewall-allowed-only-exact-proxy-ipv4-and-port",
+    "exact-host-example-com-returned-http-200",
+    "unlisted-host-denied",
+    "ip-literal-connect-denied",
+    "wrong-client-ipv4-denied",
+    "workload-ran-as-uid-gid-65532-with-zero-capabilities-and-no-new-privs",
+    "named-local-ext4-volume-owned-65532-mode-0700",
+    "state-marker-persisted-after-remount-with-mode-0600",
+    "missing-state-mount-failed-closed",
+    "proxy-controlled-stop-completed",
+    "exact-probe-containers-volume-and-network-removed"
+  ],
+  "hostSystemChanges": {
+    "dnsChanged": false,
+    "packetFilterChanged": false,
+    "privateRelayChanged": false
+  },
+  "sourceSha256": {
+    "dev-probes/agy-r13/agy-supervisor.c": "d2347471c7d9e1837ed8867915a7344f8bbb4f90ce39a953309cdc00de24d95e",
+    "dev-probes/agy-r14/capsule/Dockerfile": "f68a8a65c4059bc45033b04cc12459ab6bf3248df930dec65b6df82bda06c133",
+    "dev-probes/agy-r14/capsule/bootstrap-receiver.c": "c5157ca899418bc66912fc06519ace208541db5c6e9c4fccc6d2f7b63dc277aa",
+    "dev-probes/agy-r14/capsule/entrypoint.sh": "d9f0aab94a877243a59766dfca3fd71d70a8de18721efc40fb73b3850132820c",
+    "dev-probes/agy-r14/capsule/probe.sh": "a9bfc6ca2b5554bda7e5d1bcf0a834ba58dbe3e53be828ab29d7dfb0cd881791",
+    "dev-probes/agy-r14/proxy/Dockerfile": "b5b1e79cf2fc0742c3c95f102a8d849d83140d7785f16f97b42e462e80600c4a",
+    "scripts/lib/agy-bootstrap.mjs": "a137ebe6e01a0351ee1a279f0c15a7d6e69d63fc3dc07fc9322953c49c27257d",
+    "scripts/lib/agy-egress-proxy.mjs": "11cb7793b3ac3251bf3de2e2934ef3397f156e581bbd3d114b6c6ac4314e4e05",
+    "scripts/lib/agy-oauth-volume.mjs": "7843931f5db0ed2f522be03b480f7ba6dab198bbfe15e3b518d25789d96fef09",
+    "scripts/lib/agy-proxy-policy.mjs": "7c84c7b107aa03e6f40d8500d2ba89c651358925aa66cf729a6763baac6deb0b",
+    "scripts/agy-bootstrap-send.mjs": "0958e0f095aca7923a4603eb71c5f7208f9e9fb4d4ceb14f31d97d8a8f2451d6",
+    "scripts/agy-egress-policy.mjs": "3b1bb7cc85528331708d1d0a81093896ec43a438e83fffbb422f55a7102915a5",
+    "scripts/agy-egress-proxy.mjs": "35206df475d2c6934e6ba01f13ad78f7a247a2143bd9276ec31a55cbcd77985c",
+    "scripts/agy-oauth-volume.mjs": "5a95cc5eb7021d698a500c36ea2848f40116a66b5586a1d6a400918dc451a7b4"
+  },
+  "blockedReasons": [
+    "oauth-authentication-not-run",
+    "token-refresh-not-run",
+    "real-model-call-not-run",
+    "complete-single-run-evidence-package-missing",
+    "failure-timeout-kill-teardown-incomplete",
+    "independent-security-review-missing",
+    "capsule-not-wired-into-released-runner"
+  ],
+  "redactions": [
+    {
+      "path": "successfulProbe.runId",
+      "withheld": true,
+      "reason": "the 128-bit supervisor run nonce validated by NONCE_PATTERN; dev-docs R13 item 4 forbids recording it, and the R14 image test already asserts successfulProbe carries no bootstrapNonce. Removed before first commit to keep it out of the public fork history.",
+      "metricsUnchanged": true
+    }
+  ]
+}

@@ -1,0 +1,41 @@
+{
+  "schemaVersion": 1,
+  "stage": "R16",
+  "observedAt": "2026-08-18T18:29:38+08:00",
+  "status": "released-host-scoped",
+  "promotionEligible": false,
+  "agyVersion": "1.1.14",
+  "project": "default-cli-project",
+  "verificationModel": "gemini-3.6-flash-low",
+  "servingPathVerified": true,
+  "diagnostic": "AGY_AB_114_OK",
+  "toolWriteBinding": {
+    "target": "/workspace/agy-ab-write-proof.txt",
+    "contentSha256": "sha256:b6ac256e981482596dcd6139d6bfd94c224c15c0a6ee7ef6a05c34c65622bfe8",
+    "toolAudit": "tool-audited",
+    "mutationBindingReady": true,
+    "oauthRefreshChanged": true,
+    "runtimeResourcesCleaned": true
+  },
+  "egress": {
+    "class": "consumer-mobile-nat",
+    "regionIsCN": false,
+    "addressRetainedInEvidence": false
+  },
+  "images": {
+    "capsuleIndex": "sha256:5a1fae53d2d35098c261460144675989f47712c0ab28e0dc4587a50c6d2932d1",
+    "capsuleArm64": "sha256:d9bcdf32cfe312918c225bba33d6951225a2c455deff443fc912baa541263c27"
+  },
+  "openConditions": [
+    "serving canary is neither run-bound nor expiring",
+    "no counted independent security review since R11",
+    "region/account independence untested"
+  ],
+  "redactions": {
+    "runIdWithheld": true,
+    "runIdWithheldReason": "matches the 128-bit supervisor run nonce validated by NONCE_PATTERN; dev-docs R13 item 4 forbids recording it",
+    "egressAddressWithheld": true,
+    "runnerJobIdWithheld": true
+  },
+  "rawEvidenceLocation": "host-local, outside the repository, intentionally not committed"
+}

@@ -1,0 +1,103 @@
+{
+  "schemaVersion": 1,
+  "stage": "R15",
+  "observedAt": "2026-08-11T20:14:51Z",
+  "status": "verified-auth-real-model-call-refresh-pending",
+  "promotionEligible": false,
+  "verifierImplemented": true,
+  "hostProxyFailureObserved": true,
+  "hostProxyFailureReason": "AGY_PROXY_CONNECT_TIMEOUT",
+  "hostProxyBridgeImplemented": true,
+  "hostProxySystemDomainPresent": true,
+  "privateRelaySideEffectAcknowledged": true,
+  "hostProxyProbePassed": true,
+  "fullDefaultTopologyProbePassed": true,
+  "rejectedHostOnlyDualNetworkReason": "DNS_ECANCELLED_AND_MAPPING_EHOSTUNREACH",
+  "oauthVolumePresent": true,
+  "oauthAuthorizationCodeSubmitted": true,
+  "tokenExchangeAttempted": true,
+  "tokenExchangeCompleted": true,
+  "oauthAuthorizationCompleted": true,
+  "authenticationPersistedAcrossFreshCapsule": true,
+  "modelsProbeAttempted": true,
+  "modelsProbePassed": true,
+  "modelsObserved": 8,
+  "verificationModel": "gemini-3.6-flash-low",
+  "verificationModelPresent": true,
+  "realModelCallAttempted": true,
+  "realModelCallProven": true,
+  "modelMarkerMatched": true,
+  "modelTotalTokens": 10215,
+  "modelResponseSha256": "sha256:c93956797291a588c473fd96b79f4f2fafb7163ba2971488dd10594872f61eec",
+  "printModeEligibilityHostObserved": "lh3.googleusercontent.com",
+  "tokenRefreshAttempted": false,
+  "rawOAuthOrModelOutputRetainedInEvidence": false,
+  "nonexistentVolumeRefusalObserved": true,
+  "nonexistentVolumeRefusalReason": "AGY_R15_VERIFY_VOLUME_NOT_FOUND",
+  "liveInventory": {
+    "customContainers": 0,
+    "oauthVolumes": 1,
+    "customNetworks": 0
+  },
+  "validation": {
+    "unitTestsPassed": 207,
+    "integrationAssertionsPassed": 424,
+    "diffCheckPassed": true,
+    "independentReview": {
+      "claudeCodeVersion": "2.1.227",
+      "verdict": "no-critical-high-findings-medium-and-low-remediated",
+      "countedAsEvidence": false
+    },
+    "securityScan": {
+      "unresolvedCritical": 0,
+      "unresolvedHigh": 0,
+      "rawSecretPatternMatches": 0,
+      "reviewedExpectedSurfaces": [
+        "shell-free Apple Container subprocess calls",
+        "PATH-only host environment inheritance",
+        "exact-host sidecar network egress",
+        "bounded in-memory workload capture",
+        "loopback-only credential-free host proxy bridge",
+        "exact private proxy-capsule source lock",
+        "builtin default NAT with pre-handoff client quarantine",
+        "distinct exact client and sidecar IPv4 binding",
+        "asynchronous output-bounded credential-free bridge probe",
+        "exact Google profile-image eligibility host",
+        "redacted structural failure diagnostics"
+      ]
+    }
+  },
+  "images": {
+    "capsuleIndex": "sha256:97f32d395735445e4157793d8258d5e84787e9dd4d60c637da05ff0ad36bb815",
+    "capsuleArm64": "sha256:ed0e9126c7ebef384a98cb9cde55ee7957b27fd20ce5350bffd7960537da5d71",
+    "proxyIndex": "sha256:b7b08812eea3032da58535c6431527162d064ebc4366b9628f18ba6fe99035eb",
+    "proxyArm64": "sha256:d054b8f8ad273893f761f8c508f704470c678e5feaf7f6ebf9a2c4c9d9dbe31c"
+  },
+  "sourceSha256": {
+    "scripts/agy-r15-auth-session.mjs": "31f3efa1c9c0d075b7e48c25ddd051dc21cb43a4472f4a9d700be383ee7f2f28",
+    "scripts/agy-r15-verify-session.mjs": "5489b90ea6b02bd0f99f335e8d1f0df59cd396cb9befc2b4a4c0677573d271dd",
+    "scripts/agy-r15-egress-proxy.mjs": "9f3360400de4f514256d7cd8031b138543e4be6d00ec868680145e661c88de3a",
+    "scripts/lib/agy-egress-proxy.mjs": "11cb7793b3ac3251bf3de2e2934ef3397f156e581bbd3d114b6c6ac4314e4e05",
+    "scripts/lib/agy-proxy-policy.mjs": "7c84c7b107aa03e6f40d8500d2ba89c651358925aa66cf729a6763baac6deb0b",
+    "scripts/lib/agy-host-proxy-bridge.mjs": "8c023d27e2e8a4785544ca997e66abf07f48d57e428251f927e8e1911129491d",
+    "scripts/lib/agy-r15-proxy-policy.mjs": "8121753d665140784e683e348b5357eb899eb8f3798caddf47009c2fbbfca41e",
+    "scripts/lib/agy-r15-auth.mjs": "3283d6a30aa87fa367376e2b54c3107d13fe5bd00c08a300ef11d954a348e791",
+    "scripts/lib/agy-r15-session.mjs": "491ac21a63e1a1a6c32fedc57b25391ace14dc3a4f301e3537764523d9c06fcd",
+    "scripts/lib/agy-r15-verify.mjs": "f5ce9881a198d96e8a2c300b0c51279e408bdbdfccbeb8c9a86c67116c17f2ed",
+    "dev-probes/agy-r15/proxy/Dockerfile": "9c988726f81754c4bc76b5753a283e328c48f303047de13ad560fc09e4383471",
+    "tests/agy-host-proxy-bridge.test.mjs": "1a75fbbb86af2710747ff9f43a2e9fff63458641654b427c1157dbcd07ff4b97",
+    "tests/agy-proxy-policy.test.mjs": "fc7809f02dc14377126db74f0368346fa0f4b49fdb9c325b897a45bcbf47c824",
+    "tests/agy-r15-auth.test.mjs": "404f2e5757507e4fd23f460c90a24c710717a8befad7c229bdefbe15060981e7",
+    "tests/agy-r15-session.test.mjs": "d4694aa65e53be0d5d716fc80c2abd551e18e52c001b24aee43cae7023f2a3cb",
+    "tests/agy-r15-verify.test.mjs": "4626e4033de7c4181ff2eba7b6356b7009465c5aabfdc813778580d616c0ba1f"
+  },
+  "redactions": [
+    {
+      "path": "tests/agy-r15-verify.test.mjs",
+      "previousSourceSha256": "762a6327eae48e01826e101d1a7d9e313c799fb005fc0697c518d8f48eba4731",
+      "reason": "replaced the real macOS home path with the synthetic fixture /Users/ccsuite-test so PII never reaches the public fork",
+      "metricsUnchanged": true,
+      "assertionLogicUnchanged": true
+    }
+  ]
+}

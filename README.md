@@ -20,7 +20,7 @@ Each tool reads from its own files. `CLAUDE.md` and `AGENTS.md` sit next to each
 | **Claude → Codex delegation** | Registers the `codex-cli` MCP server in `.mcp.json`. Claude can call `/audit`, `/implement`, `/bug-analyze`, and more directly. Full Codex job tracking, background mode, and stop-time review gate included. |
 | **Codex → Claude delegation** | Registers the `claude-code` MCP server (claude-octopus) in `.codex/config.toml`. Codex skills `$claude-review`, `$claude-plan`, `$claude-implement`, `$claude-debug` delegate to Claude and return structured results. |
 | **Codex reads Claude session history** | The same `claude-code` MCP server exposes `claude_code_sessions` (list this repo's Claude Code sessions, or all projects with `all_projects: true`) and `claude_code_transcript` (read a session by id). Codex can enumerate and read past Claude conversations for the repo. |
-| **Claude → `agy` delegation** | `scripts/agy-runner.mjs` drives Antigravity CLI headlessly, with the same job tracking, background mode, deadline enforcement, and conversation resume as the Codex runner. |
+| **Claude → `agy` delegation** | Release-blocked. `scripts/agy-runner.mjs` provides probe-only job tracking, background mode, and deadline enforcement; resume and every production execution mode remain disabled. |
 | **`agy` → Claude delegation** | The same claude-octopus MCP server, registered in `agy`'s workspace config. |
 | **Claude → Grok delegation** | `/cc-suite:grok` drives **Grok Build** over the Agent Client Protocol (`scripts/grok-runner.mjs` acts as the ACP client to `grok agent stdio`), with the same job tracking, background mode, deadline enforcement, and session resume as the Codex/agy runners. |
 | **More coding agents (opt-in)** | `/cc-suite:bridge-tools` mirrors the project MCP surface into **Grok Build**, **opencode**, **Qwen Code**, and **Kimi CLI** — each selected in `.cc-suite.md`'s `## Enabled Tools` list. They read `AGENTS.md` and shared skills natively, so only MCP config is mirrored (per tool's native format). China-aware: Qwen/Kimi/opencode work natively in mainland China; Grok is VPN-only. |
@@ -67,7 +67,7 @@ Beyond the config bridge, cc-suite can **drive Grok Build as an agent**. `/cc-su
 | Flag | Meaning |
 |------|---------|
 | `--model <id>` | Grok model id (default: Grok's configured default; `grok models` lists them) |
-| `--effort <level>` | `none`…`max` reasoning effort (Grok takes an effort flag; agy does not) |
+| `--effort <level>` | `none`…`max` reasoning effort (agy supports only `low|medium|high`, and many agy model slugs already encode it) |
 | `--sandbox` | `read-only` (default) · `workspace-write` · `danger-full-access` |
 | `--background` / `--resume <id>` | Same job-tracking + resume as the Codex/agy runners |
 
@@ -88,10 +88,10 @@ What works, and what does not:
 
 | | Status |
 |---|---|
-| `AGENTS.md` as shared context | ✅ native — no bridging needed |
-| Claude → `agy` delegation | ✅ `scripts/agy-runner.mjs` (job tracking, background, resume) |
+| `AGENTS.md` as shared context | ⚠️ not a proven `agy -p` first-turn control plane; use tested `.agents/rules/` for AGY policy |
+| Claude → `agy` delegation | ⛔ no released execution mode; `scripts/agy-runner.mjs` is limited to the explicit probe path |
 | `agy` → Claude delegation | ✅ register claude-octopus in `.agents/mcp_config.json` |
-| Project-scoped skills (`.agents/skills/`) | ✅ native workspace path |
+| Project-scoped skills (`.agents/skills/`) | ✅ documented workspace path; verify print-mode discovery for critical tasks |
 | Project-scoped MCP servers (`.agents/mcp_config.json`) | ✅ native workspace path |
 
 Current Antigravity documentation defines `.agents/skills/` and
@@ -100,13 +100,125 @@ the generated MCP config ignored by default because server definitions may conta
 credentials or machine-specific paths. Global configuration remains supported for
 users who want servers or skills shared across every workspace.
 
-Two further `agy` limitations shape the runner: there is **no reasoning-effort flag**
-(effort is encoded in the model name, e.g. `Gemini 3.1 Pro (High)`), and there is
-**no machine-readable output** — `agy -p` prints prose, so there is no cost or
-turn accounting, and the conversation id must be recovered by diffing
-`~/.gemini/antigravity-cli/conversations/`. That recovery is best-effort: when two
-`agy` runs finish concurrently the diff is ambiguous, and the runner records no
-conversation id rather than attach the wrong one.
+AGY 1.1.11 exposes `stream-json`, explicit Projects, and `--effort
+low|medium|high`. `agy models` returns `slug<TAB>display_name`; current Gemini
+slugs already encode effort, so the runner rejects conflicting double routing.
+The runner takes conversation identity from the stream `init` event and result,
+usage, and terminal status from `result`; it never guesses by scanning SQLite.
+
+Security modes are intentionally fail-closed. Real 1.1.11 probes showed that
+`--mode plan --sandbox` can still execute `write_to_file`, while
+`--mode accept-edits` was unreliable in print mode. R1 therefore blocks
+`read-only`, `danger-full-access`, resume, and direct mode overrides. No AGY
+sandbox mode is released. R2-R4 rejected user- and Project-scoped permission
+grants as filesystem boundaries. R5 added a macOS-only candidate boundary: the
+whole AGY process runs under Seatbelt from a clean detached linked worktree,
+with a private ephemeral AGY configuration seeded only with the installation
+identity needed for Keychain authentication. Live probes allowed an
+in-worktree write, denied a sibling write at the OS boundary, kept the real AGY
+configuration hashes unchanged, and made the runner fail on the denied tool
+even when AGY reported terminal `SUCCESS`.
+
+R6 protects the linked-worktree `.git` pointer, inventories surviving Git
+changes on every runner-controlled post-spawn exit, and forwards cancellation
+signals to AGY's detached process group before cleanup. Timeout-after-mutation,
+cancellation, descendant cleanup, and `.git` denial now have deterministic
+macOS regression coverage. A fresh real AGY probe again allowed an intended
+workspace write, reported it in `workspaceChanges`, and rejected an outside
+terminal write without creating the target.
+
+R7 adds a private atomic run manifest and a startup scavenger. The manifest
+binds the runner and AGY process identities to the exact worktree, baseline
+commit, `.git` pointer, scratch directory, and per-run recovery token. A restart
+terminates only an attributable orphan process group, inventories surviving
+changes, removes verified scratch, and records the interrupted job as
+`aborted` / `AGY_RUNNER_ABORTED`. Four real runner `SIGKILL` injection points
+cover scratch preparation, child spawn, active streaming, and child close.
+
+R8 changes the public result from candidate to `BLOCKED`. A live AGY 1.1.11
+`init` exposed MCP, browser, subagent, terminal, notebook-execution, messaging,
+and scheduling tools without a supported CLI tool allowlist. Preflight schema 7
+therefore returns no released or candidate sandbox mode. The internal harness
+rejects executable workspace customizations, writes explicitly empty isolated
+MCP/plugin/hook configs, disables slash expansion, blocks Apple Events and Unix
+sockets, and terminates on any runtime tool outside a narrow direct-file
+allowlist. Local TCP, Mach services, remote model egress, read confidentiality,
+and the init-to-termination race remain open. See
+`dev-docs/agy-workspace-write-promotion.md` for the R8 decision record and exit
+criteria.
+
+R9 adds a catch-all `PreToolUse` deny policy to the isolated runtime, makes the
+hook and policy exact Seatbelt deny targets, requires all six proxy variables to
+name one credential-free loopback HTTP endpoint, and denies every other TCP/UDP
+destination. Real calls confirmed denial of terminal, subagent, and web-search
+tools. Promotion is still `NO-GO`: a crashing hook was observed to fail open and
+write a real worktree file, the declared proxy is not an external destination
+allowlist, and the current profile still permits a `0.0.0.0` listener. Preflight
+schema 8 exposes those blockers explicitly.
+
+R10 keeps both sandbox lists empty and replaces the next-step narrative with a
+machine-checkable external-capsule contract. Preflight schema 9 reports the
+native 500 ms audit as detective, limits the native claim to integrity only,
+and exposes eight required Apple-container capability states. Finding a
+`container` executable is only discovery: all capabilities remain `unknown`
+and `promotion_ready` remains false until current evidence is bound to the exact
+runtime, AGY binary, host, profile, supervisor-known probe run, and
+host-calculated artifact digests. Missing, stale, drifted, duplicated, forged,
+disproven, or advisory-only evidence fails closed. No VM runtime was installed
+or public AGY lane enabled by this change.
+
+R11 installs the separately authorized Apple `container` 1.2.2 runtime and
+keeps the lane blocked after live VM probes. Read-only root, zero capabilities,
+one exact workspace mount, absent host credential paths, direct host-only
+egress denial, and exact teardown all behaved as intended. A supervisor-bound
+exact-host CONNECT proxy also passed allow/deny tests and supported real macOS
+model discovery through the existing credential-free upstream proxy. Two
+promotion blockers remain: Linux AGY OAuth was not completed, and a listener
+inside the host-only VM was directly reachable from macOS despite empty
+published-port metadata. Capsule contract version 2 and preflight schema 10 add
+`host_routable_listener_blocked` as a ninth required capability. No released or
+candidate AGY sandbox mode is added.
+
+R12 closes the disproven listener control in a bounded Linux/glibc probe without
+requiring a privileged macOS PF change. The VM entrypoint loads an nftables
+default-deny policy with temporary `NET_ADMIN`, permits only the exact host
+supervisor proxy endpoint, then changes to UID/GID 65532 and irreversibly clears
+the effective, permitted, inheritable, ambient, and bounding capability sets
+with `no_new_privs=1`. The same listener that was reachable in the R11 baseline
+became unreachable from macOS, while the destination allowlist and exact
+workspace mount still worked. This remains `NO-GO`: the image and firewall are
+probe-only, Linux OAuth/model execution and isolated token refresh are unproven,
+and no scope-bound lifecycle evidence has been produced. Capsule contract
+version 3 and preflight schema 11 therefore add `workload_privilege_drop` as a
+tenth mandatory capability and keep both sandbox lists empty.
+
+R13 restores workload lifecycle attribution without trusting Apple
+`container run`'s exit code. A compiled PID 1 supervisor runs the workload as
+UID/GID 65532 with zero capabilities and `no_new_privs=1`, retains only
+`CAP_KILL` in the trusted parent, reaps every descendant, then writes one
+terminal completion record. A strict host verifier binds that record to the
+non-disclosed host-generated 128-bit run nonce and profile hash and rejects
+missing, duplicated, malformed,
+non-terminal, stale, or mismatched records. Live probes recovered exit 7 and
+SIGKILL 137 even though Apple reported 0, rejected a workload-forged record,
+and failed closed when the supervisor capability was absent. The reproducible
+probe remains outside the released runner; Linux OAuth, authenticated model
+execution, and a complete single-run capsule evidence set are still missing.
+Capsule contract version 4 requires six adversarial lifecycle probe classes,
+and preflight schema 12 keeps both sandbox lists empty.
+
+R14 adds a credential-free capsule foundation without opening the lane. A
+dedicated Apple NAT network carries one exact-client, exact-host CONNECT
+sidecar; the AGY VM starts under a default-drop quarantine and accepts the
+sidecar IPv4 through a one-time nonce on a host-loopback-only bootstrap port.
+The bootstrap ingress rule is then removed before the zero-capability workload
+runs. AGY state lives on one labeled local ext4 named volume owned by UID/GID
+65532, persists across a verified remount, and fails closed when the mount is
+absent. Live probes passed exact `example.com` egress, denied direct and
+unlisted egress, returned AGY 1.1.11, and produced an attributed exit-zero
+completion record. OAuth, token refresh, and a real model request were not run.
+Contract version 5 and preflight schema 13 therefore add the required R14 probe
+classes while keeping released and candidate sandbox lists empty.
 
 ## Install
 

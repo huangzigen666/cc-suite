@@ -106,6 +106,36 @@ test("resolveResultJob finds latest completed job", () => {
   }
 });
 
+test("resolveResultJob treats stalled jobs as readable terminal results", () => {
+  const workspace = makeTempDir();
+  try {
+    upsertJob(workspace, {
+      id: "res-stalled",
+      kind: "agy",
+      status: "stalled",
+    });
+    const { job } = resolveResultJob(workspace, "res-stalled");
+    assert.equal(job.id, "res-stalled");
+  } finally {
+    cleanupDir(workspace);
+  }
+});
+
+test("resolveResultJob treats recovered aborted jobs as readable terminal results", () => {
+  const workspace = makeTempDir();
+  try {
+    upsertJob(workspace, {
+      id: "res-aborted",
+      kind: "agy",
+      status: "aborted",
+    });
+    const { job } = resolveResultJob(workspace, "res-aborted");
+    assert.equal(job.id, "res-aborted");
+  } finally {
+    cleanupDir(workspace);
+  }
+});
+
 test("resolveResultJob throws for running job", () => {
   const workspace = makeTempDir();
   try {

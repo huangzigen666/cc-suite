@@ -607,7 +607,7 @@ and ignored by default because it can contain credentials.
 
 | Capability | agy location | cc-suite behavior |
 |---|---|---|
-| Instructions | `AGENTS.md` in the project | Native; no bridge needed |
+| Instructions | `.agents/rules/` for AGY workspace rules | Documented path; print-mode loading still requires runtime proof |
 | Skills | `.agents/skills/<name>/SKILL.md` | Symlinked from `.claude/skills/` |
 | MCP servers | `.agents/mcp_config.json` | Generated from `.mcp.json`; global config remains user-managed |
 | Commands | `.agents/skills/` | Converted from Claude commands into Skills where useful |
@@ -615,19 +615,64 @@ and ignored by default because it can contain credentials.
 
 ### Headless delegation
 
-`scripts/agy-runner.mjs` invokes `agy -p` with job tracking, deadlines, optional
-resume, and the same foreground/background result shape used by the Codex
-runner. `agy` has no JSON event stream or printed conversation id, so the runner
-captures prose output directly and recovers a new conversation id by diffing
-`~/.gemini/antigravity-cli/conversations/`.
+`scripts/agy-runner.mjs` invokes `agy -p` with an explicit non-default Project,
+job tracking, deadlines, and `--output-format stream-json`. The stream `init`
+event is the only conversation-ID source; the `result` event supplies the final
+response, status, and usage. There is no filesystem-diff fallback.
 
-The runner maps cc-suite's sandbox vocabulary onto agy's flags:
-
-| cc-suite level | agy flags |
-|---|---|
-| `read-only` | `--sandbox` |
-| `workspace-write` | `--mode accept-edits --dangerously-skip-permissions` |
-| `danger-full-access` | `--dangerously-skip-permissions` |
+No AGY execution mode is released. R2-R4 rejected inherited user grants,
+Project grants, and a path hook as complete filesystem boundaries. R5 replaces
+them with a macOS-only candidate: the entire AGY process tree runs under
+Seatbelt from the exact root of a clean detached linked worktree. The runner
+rejects external/dangling symlinks and hardlinked regular files, builds a
+private ephemeral AGY settings/Project/runtime tree, and seeds only the
+installation identity needed for Keychain authentication. The generated
+boundary is audited before spawn, at authoritative init, periodically during
+execution, and after exit. Live runner probes allowed an in-worktree write,
+denied a sibling write, preserved real settings hashes, removed scratch, and
+failed a denied tool even when AGY's terminal result said `SUCCESS`.
+R6 makes the linked-worktree `.git` pointer immutable, inventories surviving
+workspace changes on every post-spawn result, and forwards runner cancellation
+to AGY's independent process group before scratch cleanup. Timeout mutation,
+cancellation, descendant cleanup, and `.git` denial are regression-tested; a
+fresh real AGY write was reported in `workspaceChanges` and an outside terminal
+attempt left no target.
+R7 persists a private atomic run manifest and scavenges it on the next runner
+start. Recovery validates the worktree baseline, `.git` fingerprint, scratch
+token, and process start identity before terminating an orphan process group or
+deleting scratch. Interrupted jobs become `aborted` and retain
+`workspaceChanges`; four runner-level `SIGKILL` injection points cover the
+bounded lifecycle.
+R8 removes the candidate from preflight after a live AGY 1.1.11 init exposed
+MCP, browser, subagent, terminal, notebook-execution, messaging, and scheduling
+tools without a supported runtime allowlist. The internal harness rejects
+workspace MCP/hooks/plugin execution surfaces, writes empty isolated configs,
+disables slash expansion, blocks Apple Events and Unix sockets, and terminates
+on an unsafe init inventory. Local TCP and Mach services remain open because a
+blanket inbound deny prevents AGY from reaching init, while a filtered rule did
+not block a non-loopback listener. Remote model egress and read confidentiality
+also remain outside the boundary.
+R9 adds a generated catch-all `PreToolUse` deny policy, mode-0400 hook and
+policy artifacts protected by exact Seatbelt write denies, and a normalized
+loopback-proxy-only outbound rule. Real probes denied `run_command`,
+`invoke_subagent`, and `search_web`; empty isolated MCP state left no callable
+MCP tool. A forced policy-process crash then allowed `write_to_file` to create a
+real worktree file, proving AGY's hook failure path is fail-open. The profile
+also denied off-proxy TCP/UDP while still allowing a `0.0.0.0` listener. These
+are release blockers, so schema 8 keeps both sandbox lists empty.
+R10 retains that `NO-GO` decision and adds the external-capsule evidence
+contract. Schema 9 distinguishes runtime discovery from promotion, labels the
+500 ms boundary re-audit as detective, and requires eight `proven`
+capabilities with accepted kernel/supervisor assurance, probe evidence, exact
+runtime/AGY/host/profile binding, and a bounded validity window. The current
+host has no Apple `container` runtime, so every capsule capability remains
+`unknown`; no public or candidate sandbox mode is exposed.
+`read-only` is blocked because AGY 1.1.11 plan mode was observed executing
+direct file writes. `danger-full-access`, resume,
+`--add-dir`, direct mode overrides, and `--dangerously-skip-permissions` are
+blocked until a later permission-profile design is independently verified.
+The complete R10 decision record and promotion contract are in
+`dev-docs/agy-workspace-write-promotion.md`.
 
 ---
 

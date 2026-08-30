@@ -68,7 +68,11 @@ Tests cover every `scripts/*.sh`, the Codex and Antigravity MCP projection paths
 **Always write new instructions, rules, and memory to `AGENTS.md` only.**
 
 Never modify `CLAUDE.md` or legacy `GEMINI.md` directly — they only import `AGENTS.md`.
-This keeps Claude Code, Codex CLI, and Antigravity CLI (`agy`) on the same context.
+This keeps one repository source of truth for Claude Code and Codex CLI. Do not
+assume `agy -p` loaded it: first-turn runtime probes did not find root
+`AGENTS.md`. The agy runner injects only its required semantic reminder, while
+AGY-native workspace policy belongs in `.agents/rules/` after runtime loading is
+verified.
 
 ## Project Structure
 
@@ -81,7 +85,7 @@ This keeps Claude Code, Codex CLI, and Antigravity CLI (`agy`) on the same conte
 - `.cc-suite.md` — per-project config, incl. the `## Enabled Tools` list that selects which agents the multi-tool bridge targets
 - `.grok/config.toml` / `opencode.json` / `.qwen/settings.json` / `~/.kimi/mcp.json` — MCP config mirrored into opt-in coding agents by `scripts/bridge_tools.py` (`/cc-suite:bridge-tools`); `.cc-suite-*.provenance.json` sidecars track cc-suite-owned entries and are gitignored
 - `~/.gemini/config/` — Antigravity CLI's global MCP/plugin configuration
-- `~/.gemini/antigravity-cli/skills/` — Antigravity CLI's global skills configuration
+- `~/.gemini/config/skills/` — Antigravity CLI 1.1.x global skills configuration
 - `.cc-suite/agents/<name>.md` — declared advisor agents (see below)
 - `.cc-suite/agents/<name>/timeline/` — per-agent consultation history (gitignored by default)
 
@@ -97,10 +101,10 @@ Delegation lanes:
 |------|-----------|-----------|
 | Claude → Codex | `codex-runner.mjs` (`codex exec`) + `codex-cli` MCP server | `/cc-suite:codex-preflight` (`codex-preflight.sh`) |
 | Codex / agy → Claude | pinned `claude-octopus` MCP server (also exposes `claude_code_sessions` / `_transcript`) | — |
-| Claude → agy | `agy-runner.mjs` (`agy -p`, conversation recovered by dir-diff) | `/cc-suite:agy-preflight` (`agy-preflight.sh`) |
+| Claude → agy | R16 external Apple Container capsule. `workspace-write` is published only when all four hold: `agy --version` is `1.1.14`, `container` is at `/usr/local/bin/container`, `agy-r16-preflight.mjs` returns `promotion_ready:true`, and `~/.config/cc-suite/agy-r16-serving-evidence.json` reports `serving_path_verified:true` for `1.1.14`. Every other host stays blocked (`r16_serving_path_not_verified`). Entry point is `/cc-suite:agy` → `scripts/agy-public-runner.mjs`. **That serving canary is an out-of-band, non-expiring host-local file, not run-bound evidence.** The legacy in-process Seatbelt harness (R9 / AGY 1.1.11 / hook fail-open) remains evidence-only. | `/cc-suite:agy-preflight` (`agy-preflight.sh`) |
 | Claude → Grok | `grok-runner.mjs` — ACP client driving `grok agent stdio` (`initialize` → `session/new`/`load` → `session/prompt`); `threadId` is the ACP session id | `/cc-suite:grok-preflight` (`grok-preflight.sh`, fast/local) |
 
-All preflight scripts emit the same JSON shape (`status`, `default_model`, `models`, `reasoning_efforts`, `sandbox_levels`, `error_code`). New backend runner ⇒ mirror `agy-runner.mjs` (parseArgs / executeX / runForeground / runBackground / runBackgroundWorker) and add a `<backend>-preflight`.
+All preflight scripts emit the same JSON shape (`status`, `default_model`, `models`, `reasoning_efforts`, `sandbox_levels`, `error_code`); a backend may also expose unreleased `candidate_sandbox_levels`. New backend runner ⇒ mirror `agy-runner.mjs` (parseArgs / executeX / runForeground / runBackground / runBackgroundWorker) and add a `<backend>-preflight`.
 
 Multi-tool config bridge (`scripts/bridge_tools.py`, `/cc-suite:bridge-tools`): a declarative tool-profile registry that mirrors the project MCP surface into **Grok Build, opencode, Qwen Code, Kimi CLI** (three emitters: TOML `mcp_servers`, opencode nested `mcp`, JSON `mcpServers`). Tools are selected in `.cc-suite.md`'s `## Enabled Tools`; Claude/Codex/Antigravity keep their existing bridge scripts (`bridged_by: "existing"`). Env values and remote headers are never mirrored (secrets). Design: `dev-docs/supporting-more-coding-agents.md`.
 

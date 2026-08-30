@@ -97,11 +97,23 @@ export function renderStatusReport(report) {
 export function renderJobResult(job, storedJob) {
   const threadId = storedJob?.threadId ?? job.threadId ?? null;
   const rawOutput = storedJob?.result?.rawOutput ?? storedJob?.rawOutput ?? "";
+  const errorCode = storedJob?.errorCode ?? job.errorCode ?? null;
+  const errorMessage = storedJob?.error ?? job.errorMessage ?? null;
+  const workspaceChanges = Array.isArray(storedJob?.workspaceChanges)
+    ? storedJob.workspaceChanges
+    : null;
 
   if (rawOutput) {
-    const output = rawOutput.endsWith("\n") ? rawOutput : `${rawOutput}\n`;
-    if (!threadId) return output;
-    return `${output}\nThread ID: ${threadId}\nContinue: /continue ${threadId}\n`;
+    const sections = [rawOutput.trimEnd()];
+    if (workspaceChanges) {
+      sections.push(
+        `Workspace changes:\n\n\`\`\`text\n${workspaceChanges.length ? workspaceChanges.join("\n") : "(clean)"}\n\`\`\``
+      );
+    }
+    if (threadId) {
+      sections.push(`Thread ID: ${threadId}\nContinue: /continue ${threadId}`);
+    }
+    return `${sections.join("\n\n")}\n`;
   }
 
   const lines = [
@@ -117,8 +129,18 @@ export function renderJobResult(job, storedJob) {
     lines.push(`Continue: /continue ${threadId}`);
   }
   if (job.summary) lines.push(`Summary: ${job.summary}`);
-  if (job.errorMessage) {
-    lines.push("", job.errorMessage);
+  if (workspaceChanges) {
+    lines.push(
+      "",
+      "Workspace changes:",
+      "",
+      "```text",
+      ...(workspaceChanges.length ? workspaceChanges : ["(clean)"]),
+      "```"
+    );
+  }
+  if (errorCode || errorMessage) {
+    lines.push("", [errorCode, errorMessage].filter(Boolean).join(": "));
   } else {
     lines.push("", "No captured result payload was stored for this job.");
   }

@@ -93,6 +93,33 @@ TMP=""
 make_tmp() { TMP="$(mktemp -d)"; cd "$TMP"; }
 cleanup()   { cd /; rm -rf "${TMP:-}"; TMP=""; }
 
+# Build the exact R5 execution shape: a clean detached linked worktree. AGY
+# fixtures, HOME, and captured test output stay in the orchestration root so the
+# sandboxed child can only mutate the linked worktree and its private scratch.
+make_agy_worktree() {
+  export HTTP_PROXY='http://127.0.0.1:7892'
+  export HTTPS_PROXY="$HTTP_PROXY"
+  export ALL_PROXY="$HTTP_PROXY"
+  export http_proxy="$HTTP_PROXY"
+  export https_proxy="$HTTP_PROXY"
+  export all_proxy="$HTTP_PROXY"
+  AGY_FIXTURE_BASE="$(pwd -P)"
+  mkdir -p \
+    "$AGY_FIXTURE_BASE/source" \
+    "$AGY_FIXTURE_BASE/home/.gemini/antigravity-cli"
+  printf '%s\n' fixture-installation-id \
+    > "$AGY_FIXTURE_BASE/home/.gemini/antigravity-cli/installation_id"
+  git -C "$AGY_FIXTURE_BASE/source" init -q
+  printf '%s\n' fixture > "$AGY_FIXTURE_BASE/source/README.md"
+  git -C "$AGY_FIXTURE_BASE/source" add README.md
+  git -C "$AGY_FIXTURE_BASE/source" \
+    -c user.name='cc-suite test' -c user.email='cc-suite@example.invalid' \
+    commit -qm fixture
+  git -C "$AGY_FIXTURE_BASE/source" worktree add --detach \
+    "$AGY_FIXTURE_BASE/worktree" HEAD >/dev/null
+  FIXTURE_ROOT="$(cd "$AGY_FIXTURE_BASE/worktree" && pwd -P)"
+}
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # T01  init.sh — fresh project (no CLAUDE.md, no AGENTS.md)
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -1408,11 +1435,64 @@ printf '%s' "$out" > preflight.json
 
 assert_contains "preflight.json" '"status":"error"'
 assert_contains "preflight.json" "antigravity-cli"
-# reasoning_efforts must be empty: agy encodes effort in the model name, so a
-# caller offering an effort picker for this backend would be wrong.
+# With no binary, effort capability cannot be discovered.
 assert_contains "preflight.json" '"reasoning_efforts":[]'
+assert_contains "preflight.json" '"models_detail":[]'
+assert_contains "preflight.json" '"sandbox_levels":[]'
+assert_contains "preflight.json" '"candidate_sandbox_levels":[]'
+assert_contains "preflight.json" '"reason":"r14_oauth_authentication_and_real_model_call_not_run"'
+assert_contains "preflight.json" '"hook_failure_mode":"fail_open"'
+assert_contains "preflight.json" '"local_bind_confined":false'
+assert_contains "preflight.json" '"destination_egress_confined":false'
+assert_contains "preflight.json" '"boundary_audit":"detective_500ms"'
+assert_contains "preflight.json" '"native_assurance_scope":"integrity_only"'
+assert_contains "preflight.json" '"runtime_detected":false'
+assert_contains "preflight.json" '"promotion_ready":false'
+assert_contains "preflight.json" '"reason":"r14_apple_container_not_installed"'
+assert_contains "preflight.json" '"project_required":true'
+assert_contains "preflight.json" '"detached_worktree_required":true'
+assert_contains "preflight.json" '"isolated_runtime":true'
+assert_contains "preflight.json" '"seatbelt_available":true'
 # Must still be parseable JSON, not a shell error dump.
-assert_exit0 python3 -c "import json,sys; json.load(open('preflight.json'))"
+assert_exit0 python3 -c "import json; d=json.load(open('preflight.json')); assert d['preflight_schema'] == 14; assert d['external_capsule']['contract_version'] == 5; assert len(d['external_capsule']['capabilities']) == 10; assert d['oauth_state_isolated'] is False; assert d['bootstrap_handoff_confined'] is False"
+
+cleanup
+
+# ══════════ T51a  agy-preflight.sh — macOS timeout fallback is bounded ════════
+section "T51a: agy-preflight.sh — fallback terminates a stalled process group"
+make_tmp
+
+mkdir -p bin home cache
+cat > bin/agy <<'AGY'
+#!/usr/bin/env bash
+case "${1:-}" in
+  --version) printf '%s\n' 'agy version 1.1.11' ;;
+  --help) printf '%s\n' 'Usage: agy [--effort]' ;;
+  models)
+    printf '%s\n' "$$" > "$AGY_FAKE_PARENT_PID_FILE"
+    sleep 30 &
+    printf '%s\n' "$!" > "$AGY_FAKE_CHILD_PID_FILE"
+    wait
+    ;;
+  *) exit 0 ;;
+esac
+AGY
+chmod +x bin/agy
+
+out="$(env HOME="$PWD/home" XDG_CACHE_HOME="$PWD/cache" \
+      PATH="$PWD/bin:/usr/bin:/bin" AGY_PREFLIGHT_NO_CACHE=1 \
+      AGY_MODELS_TIMEOUT_SECONDS=1 \
+      AGY_FAKE_PARENT_PID_FILE="$PWD/parent.pid" \
+      AGY_FAKE_CHILD_PID_FILE="$PWD/child.pid" \
+      bash "$SCRIPTS/agy-preflight.sh" 2>/dev/null)"
+printf '%s' "$out" > preflight.json
+
+assert_contains "preflight.json" '"error_code":"agy_probe_timeout"'
+assert_exit0 python3 -c "import json; json.load(open('preflight.json'))"
+parent_pid="$(cat parent.pid)"
+child_pid="$(cat child.pid)"
+assert_exit_nonzero kill -0 "$parent_pid"
+assert_exit_nonzero kill -0 "$child_pid"
 
 cleanup
 
@@ -1432,13 +1512,20 @@ cleanup
 section "T53: agy-runner.mjs — agy not on PATH"
 make_tmp
 
-mkdir -p node-bin
+make_agy_worktree
+mkdir -p node-bin home/.gemini/antigravity-cli home/.gemini/config/projects
 ln -s "$(command -v node)" node-bin/node
 STERILE_PATH="$PWD/node-bin:/usr/bin:/bin"
+printf '{"allowNonWorkspaceAccess":false,"trustedWorkspaces":["%s"],"permissions":{"allow":["write_file(%s)"]}}\n' "$FIXTURE_ROOT" "$FIXTURE_ROOT" > home/.gemini/antigravity-cli/settings.json
+printf '%s\n' '{"userSettings":{"nonWorkspaceFileAccessPolicy":"AGENT_SETTING_POLICY_DENY","autoExecutionPolicy":"CASCADE_COMMANDS_AUTO_EXECUTION_OFF","artifactReviewMode":"ARTIFACT_REVIEW_MODE_ALWAYS","browserJsExecutionPolicy":"BROWSER_JS_EXECUTION_POLICY_ALWAYS_ASK"}}' > home/.gemini/config/config.json
+printf '{"id":"fixture-project","name":"Fixture","projectResources":{"resources":[{"folderUri":"file://%s"}]}}\n' "$FIXTURE_ROOT" > home/.gemini/config/projects/fixture-project.json
 
 # Runner reports failure in-band (JSON on stdout) and exits 1; capture both.
-out="$(env PATH="$STERILE_PATH" node "$SCRIPTS/agy-runner.mjs" \
-        --kind agy --timeout-ms 10000 -- "smoke" 2>/dev/null || true)"
+out="$(cd "$FIXTURE_ROOT" && env HOME="$AGY_FIXTURE_BASE/home" PATH="$STERILE_PATH" \
+        node "$SCRIPTS/agy-runner.mjs" \
+        --kind agy --project fixture-project --model gemini-3.6-flash-low \
+        --sandbox workspace-write --candidate-workspace-write \
+        --timeout-ms 10000 -- "smoke" 2>/dev/null || true)"
 printf '%s' "$out" > result.json
 
 assert_exit0 python3 -c "import json,sys; json.load(open('result.json'))"
@@ -1446,6 +1533,251 @@ assert_contains "result.json" '"status":"failed"'
 assert_contains "result.json" "agy not found on PATH"
 # A failed spawn must still register a job so /cc-suite:status can see it.
 assert_contains "result.json" '"jobId"'
+
+cleanup
+
+# ══════════ T53a  agy-runner.mjs — stream-json identity and result ═══════════
+section "T53a: agy-runner.mjs — parses authoritative stream-json"
+make_tmp
+
+make_agy_worktree
+mkdir -p bin home/.gemini/antigravity-cli home/.gemini/config/projects
+printf '{"allowNonWorkspaceAccess":false,"trustedWorkspaces":["%s"],"permissions":{"allow":["write_file(%s)"]}}\n' "$FIXTURE_ROOT" "$FIXTURE_ROOT" > home/.gemini/antigravity-cli/settings.json
+printf '%s\n' '{"userSettings":{"nonWorkspaceFileAccessPolicy":"AGENT_SETTING_POLICY_DENY","autoExecutionPolicy":"CASCADE_COMMANDS_AUTO_EXECUTION_OFF","artifactReviewMode":"ARTIFACT_REVIEW_MODE_ALWAYS","browserJsExecutionPolicy":"BROWSER_JS_EXECUTION_POLICY_ALWAYS_ASK"}}' > home/.gemini/config/config.json
+printf '{"id":"fixture-project","name":"Fixture","projectResources":{"resources":[{"folderUri":"file://%s"}]}}\n' "$FIXTURE_ROOT" > home/.gemini/config/projects/fixture-project.json
+
+cat > bin/agy <<'AGY'
+#!/usr/bin/env bash
+: > "$PWD/agy-args.txt"
+for arg in "$@"; do
+  printf '%s\n' "$arg" >> "$PWD/agy-args.txt"
+  [ "$arg" = "-p" ] && break
+done
+FAKE_CWD="$(pwd -P)"
+printf '{"event":"init","conversation_id":"fixture-conversation","init":{"model":"gemini-3.6-flash-low","cwd":"%s","tools":["view_file"],"permission_mode":"request-review"}}\n' "$FAKE_CWD"
+printf '{"event":"result","result":{"conversation_id":"fixture-conversation","status":"SUCCESS","response":"STREAM_OK\\n","usage":{"total_tokens":42}}}\n'
+AGY
+chmod +x bin/agy
+
+out="$(cd "$FIXTURE_ROOT" && env HOME="$AGY_FIXTURE_BASE/home" PATH="$AGY_FIXTURE_BASE/bin:$PATH" \
+        node "$SCRIPTS/agy-runner.mjs" \
+        --kind agy --project fixture-project \
+        --model gemini-3.6-flash-low --sandbox workspace-write \
+        --candidate-workspace-write \
+        --timeout-ms 10000 -- "smoke")"
+printf '%s' "$out" > result.json
+
+assert_contains "result.json" '"status":"completed"'
+assert_contains "result.json" '"threadId":"fixture-conversation"'
+assert_contains "result.json" '"rawOutput":"STREAM_OK"'
+assert_contains "result.json" '"permissionMode":"request-review"'
+assert_contains "result.json" '"total_tokens":42'
+assert_exit0 grep -Fx -- "--project" "$FIXTURE_ROOT/agy-args.txt"
+assert_exit0 grep -Fx -- "fixture-project" "$FIXTURE_ROOT/agy-args.txt"
+assert_exit0 grep -Fx -- "--output-format" "$FIXTURE_ROOT/agy-args.txt"
+assert_exit0 grep -Fx -- "stream-json" "$FIXTURE_ROOT/agy-args.txt"
+assert_exit_nonzero grep -Fx -- "--dangerously-skip-permissions" "$FIXTURE_ROOT/agy-args.txt"
+assert_exit_nonzero grep -Fx -- "--mode" "$FIXTURE_ROOT/agy-args.txt"
+
+cleanup
+
+# ═════ T53a2  agy-runner.mjs — typed tool error overrides SUCCESS result ═════
+section "T53a2: agy-runner.mjs — fails closed on stream tool errors"
+make_tmp
+
+make_agy_worktree
+mkdir -p bin home/.gemini/antigravity-cli home/.gemini/config/projects
+printf '{"trustedWorkspaces":["%s"],"permissions":{"allow":["write_file(%s)"]}}\n' "$FIXTURE_ROOT" "$FIXTURE_ROOT" > home/.gemini/antigravity-cli/settings.json
+printf '%s\n' '{"userSettings":{"nonWorkspaceFileAccessPolicy":"AGENT_SETTING_POLICY_DENY","autoExecutionPolicy":"CASCADE_COMMANDS_AUTO_EXECUTION_OFF","artifactReviewMode":"ARTIFACT_REVIEW_MODE_ALWAYS","browserJsExecutionPolicy":"BROWSER_JS_EXECUTION_POLICY_ALWAYS_ASK"}}' > home/.gemini/config/config.json
+printf '{"id":"fixture-project","name":"Fixture","projectResources":{"resources":[{"folderUri":"file://%s"}]}}\n' "$FIXTURE_ROOT" > home/.gemini/config/projects/fixture-project.json
+
+cat > bin/agy <<'AGY'
+#!/usr/bin/env bash
+FAKE_CWD="$(pwd -P)"
+printf '{"event":"init","conversation_id":"fixture-tool-error","init":{"model":"gemini-3.6-flash-low","cwd":"%s","tools":["write_to_file"],"permission_mode":"request-review"}}\n' "$FAKE_CWD"
+printf '%s\n' '{"event":"step_update","step_update":{"state":"ERROR","step_type":"tool","tool_name":"write_to_file","tool_info":{"name":"write_to_file","error":{"type":"TOOL_ERROR","message":"User denied permission for write_file(../escape.txt)."}}}}'
+printf '%s\n' '{"event":"result","result":{"conversation_id":"fixture-tool-error","status":"SUCCESS","response":""}}'
+AGY
+chmod +x bin/agy
+
+out="$(cd "$FIXTURE_ROOT" && env HOME="$AGY_FIXTURE_BASE/home" PATH="$AGY_FIXTURE_BASE/bin:$PATH" \
+        node "$SCRIPTS/agy-runner.mjs" \
+        --kind agy --project fixture-project \
+        --model gemini-3.6-flash-low --sandbox workspace-write \
+        --candidate-workspace-write \
+        --timeout-ms 10000 -- "smoke" || true)"
+printf '%s' "$out" > result.json
+
+assert_contains "result.json" '"status":"failed"'
+assert_contains "result.json" '"errorCode":"AGY_TOOL_ERROR"'
+assert_contains "result.json" 'User denied permission'
+
+cleanup
+
+# ═════ T53a3  agy-runner.mjs — boundary drift terminates execution ════════════
+section "T53a3: agy-runner.mjs — fails closed on in-flight boundary drift"
+make_tmp
+
+make_agy_worktree
+mkdir -p bin home/.gemini/antigravity-cli home/.gemini/config/projects
+printf '{"allowNonWorkspaceAccess":false,"trustedWorkspaces":["%s"],"permissions":{"allow":["write_file(%s)"]}}\n' "$FIXTURE_ROOT" "$FIXTURE_ROOT" > home/.gemini/antigravity-cli/settings.json
+printf '%s\n' '{"userSettings":{"nonWorkspaceFileAccessPolicy":"AGENT_SETTING_POLICY_DENY","autoExecutionPolicy":"CASCADE_COMMANDS_AUTO_EXECUTION_OFF","artifactReviewMode":"ARTIFACT_REVIEW_MODE_ALWAYS","browserJsExecutionPolicy":"BROWSER_JS_EXECUTION_POLICY_ALWAYS_ASK"}}' > home/.gemini/config/config.json
+printf '{"id":"fixture-project","name":"Fixture","projectResources":{"resources":[{"folderUri":"file://%s"}]}}\n' "$FIXTURE_ROOT" > home/.gemini/config/projects/fixture-project.json
+
+cat > bin/agy <<'AGY'
+#!/usr/bin/env bash
+FAKE_CWD="$(pwd -P)"
+printf '{"event":"init","conversation_id":"fixture-boundary-drift","init":{"model":"gemini-3.6-flash-low","cwd":"%s","tools":["write_to_file"],"permission_mode":"request-review"}}\n' "$FAKE_CWD"
+for arg in "$@"; do
+  case "$arg" in
+    --gemini_dir=*) FAKE_GEMINI_DIR="${arg#--gemini_dir=}" ;;
+  esac
+done
+sleep 1
+printf '%s\n' '{"allowNonWorkspaceAccess":true,"trustedWorkspaces":["/"],"permissions":{"allow":["write_file(*)"]}}' \
+  > "$FAKE_GEMINI_DIR/antigravity-cli/settings.json"
+sleep 5
+printf '%s\n' '{"event":"result","result":{"conversation_id":"fixture-boundary-drift","status":"SUCCESS","response":"UNSAFE"}}'
+AGY
+chmod +x bin/agy
+
+out="$(cd "$FIXTURE_ROOT" && env HOME="$AGY_FIXTURE_BASE/home" PATH="$AGY_FIXTURE_BASE/bin:$PATH" \
+      node "$SCRIPTS/agy-runner.mjs" \
+      --kind agy --project fixture-project \
+      --model gemini-3.6-flash-low --sandbox workspace-write \
+      --candidate-workspace-write \
+      --timeout-ms 10000 -- "smoke" || true)"
+printf '%s' "$out" > result.json
+
+assert_contains "result.json" '"status":"failed"'
+assert_contains "result.json" '"errorCode":"AGY_PERMISSION_BOUNDARY_UNSAFE"'
+assert_contains "result.json" 'NON_WORKSPACE_ACCESS_ALLOWED'
+assert_not_contains "result.json" '"status":"completed"'
+
+cleanup
+
+# ══════════ T53b  agy-runner.mjs — cleans lingering process group ═══════════
+section "T53b: agy-runner.mjs — terminates lingering terminal descendants"
+make_tmp
+
+make_agy_worktree
+mkdir -p bin home/.gemini/antigravity-cli home/.gemini/config/projects
+printf '{"allowNonWorkspaceAccess":false,"trustedWorkspaces":["%s"],"permissions":{"allow":["write_file(%s)"]}}\n' "$FIXTURE_ROOT" "$FIXTURE_ROOT" > home/.gemini/antigravity-cli/settings.json
+printf '%s\n' '{"userSettings":{"nonWorkspaceFileAccessPolicy":"AGENT_SETTING_POLICY_DENY","autoExecutionPolicy":"CASCADE_COMMANDS_AUTO_EXECUTION_OFF","artifactReviewMode":"ARTIFACT_REVIEW_MODE_ALWAYS","browserJsExecutionPolicy":"BROWSER_JS_EXECUTION_POLICY_ALWAYS_ASK"}}' > home/.gemini/config/config.json
+printf '{"id":"fixture-project","name":"Fixture","projectResources":{"resources":[{"folderUri":"file://%s"}]}}\n' "$FIXTURE_ROOT" > home/.gemini/config/projects/fixture-project.json
+
+cat > bin/agy <<'AGY'
+#!/usr/bin/env bash
+sleep 60 >"$TMPDIR/child.out" 2>&1 &
+printf '%s\n' "$!" > "$PWD/child.pid"
+FAKE_CWD="$(pwd -P)"
+printf '{"event":"init","conversation_id":"fixture-cleanup","init":{"model":"gemini-3.6-flash-low","cwd":"%s","tools":["view_file"],"permission_mode":"request-review"}}\n' "$FAKE_CWD"
+printf '{"event":"result","result":{"conversation_id":"fixture-cleanup","status":"SUCCESS","response":"DONE"}}\n'
+AGY
+chmod +x bin/agy
+
+out="$(cd "$FIXTURE_ROOT" && env HOME="$AGY_FIXTURE_BASE/home" PATH="$AGY_FIXTURE_BASE/bin:$PATH" \
+        node "$SCRIPTS/agy-runner.mjs" \
+        --kind agy --project fixture-project \
+        --model gemini-3.6-flash-low --sandbox workspace-write \
+        --candidate-workspace-write \
+        --timeout-ms 10000 -- "smoke")"
+printf '%s' "$out" > result.json
+assert_contains "result.json" '"status":"completed"'
+
+child_pid="$(cat "$FIXTURE_ROOT/child.pid")"
+child_alive=1
+for _ in 1 2 3 4 5 6 7 8 9 10; do
+  if ! kill -0 "$child_pid" 2>/dev/null; then child_alive=0; break; fi
+  sleep 0.1
+done
+if [ "$child_alive" -eq 0 ]; then
+  ok_msg "lingering child process terminated"
+else
+  kill -TERM "$child_pid" 2>/dev/null || true
+  fail_msg "lingering child process survived runner completion"
+fi
+
+cleanup
+
+# ═════ T53c  agy-runner.mjs — timeout inventories surviving mutations ════════
+section "T53c: agy-runner.mjs — timeout inventories workspace mutations"
+make_tmp
+
+make_agy_worktree
+mkdir -p bin
+cat > bin/agy <<'AGY'
+#!/usr/bin/env bash
+printf '%s\n' changed-before-timeout > "$PWD/timeout-change.txt"
+FAKE_CWD="$(pwd -P)"
+printf '{"event":"init","conversation_id":"fixture-timeout","init":{"model":"gemini-3.6-flash-low","cwd":"%s","tools":["write_to_file"],"permission_mode":"request-review"}}\n' "$FAKE_CWD"
+sleep 60
+AGY
+chmod +x bin/agy
+
+out="$(cd "$FIXTURE_ROOT" && env HOME="$AGY_FIXTURE_BASE/home" PATH="$AGY_FIXTURE_BASE/bin:$PATH" \
+        node "$SCRIPTS/agy-runner.mjs" \
+        --kind agy --project fixture-project \
+        --model gemini-3.6-flash-low --sandbox workspace-write \
+        --candidate-workspace-write \
+        --timeout-ms 1500 -- "smoke" || true)"
+printf '%s' "$out" > result.json
+
+assert_contains "result.json" '"status":"stalled"'
+assert_contains "result.json" '"errorCode":"AGY_DEADLINE_EXCEEDED"'
+assert_contains "result.json" '"workspaceChanges":["?? timeout-change.txt"]'
+assert_file "$FIXTURE_ROOT/timeout-change.txt"
+
+cleanup
+
+# ═════ T53d  agy-runner.mjs — parent cancellation reaches AGY descendants ════
+section "T53d: agy-runner.mjs — cancellation reaches AGY descendants"
+make_tmp
+
+make_agy_worktree
+mkdir -p bin
+cat > bin/agy <<'AGY'
+#!/usr/bin/env bash
+printf '%s\n' "$$" > "$PWD/agy.pid"
+sleep 60 >"$TMPDIR/descendant.out" 2>&1 &
+printf '%s\n' "$!" > "$PWD/descendant.pid"
+FAKE_CWD="$(pwd -P)"
+printf '{"event":"init","conversation_id":"fixture-cancel","init":{"model":"gemini-3.6-flash-low","cwd":"%s","tools":["view_file"],"permission_mode":"request-review"}}\n' "$FAKE_CWD"
+wait
+AGY
+chmod +x bin/agy
+
+(
+  cd "$FIXTURE_ROOT"
+  exec env HOME="$AGY_FIXTURE_BASE/home" \
+    CLAUDE_PLUGIN_DATA="$AGY_FIXTURE_BASE/plugin-data" \
+    PATH="$AGY_FIXTURE_BASE/bin:$PATH" \
+    node "$SCRIPTS/agy-runner.mjs" \
+    --kind agy --project fixture-project \
+    --model gemini-3.6-flash-low --sandbox workspace-write \
+    --candidate-workspace-write \
+    --timeout-ms 10000 -- "smoke"
+) > result.json 2>runner.err &
+runner_pid=$!
+
+for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
+  [ -f "$FIXTURE_ROOT/descendant.pid" ] && break
+  sleep 0.1
+done
+assert_file "$FIXTURE_ROOT/agy.pid"
+assert_file "$FIXTURE_ROOT/descendant.pid"
+agy_pid="$(cat "$FIXTURE_ROOT/agy.pid")"
+descendant_pid="$(cat "$FIXTURE_ROOT/descendant.pid")"
+worker_pid="$(python3 -c 'import glob,json,sys; files=glob.glob(sys.argv[1]); print(json.load(open(files[0]))["jobs"][0]["pid"])' "$AGY_FIXTURE_BASE/plugin-data/state/*/state.json")"
+kill -TERM "$worker_pid" 2>/dev/null || true
+wait "$runner_pid" 2>/dev/null || true
+
+assert_contains "result.json" '"status":"cancelled"'
+assert_contains "result.json" '"errorCode":"AGY_CANCELLED"'
+assert_exit_nonzero kill -0 "$agy_pid"
+assert_exit_nonzero kill -0 "$descendant_pid"
+# Keep the RED test itself hygienic when running against the unfixed runner.
+kill -TERM "$agy_pid" "$descendant_pid" 2>/dev/null || true
 
 cleanup
 
@@ -1563,7 +1895,8 @@ cat > bin/agy <<'AGY'
 #!/usr/bin/env bash
 case "$1" in
   "--version") echo "agy 1.1.2" ;;
-  "models") echo "Gemini 3.1 Pro (High)"; echo "Gemini 3.5 Flash (Low)" ;;
+  "--help") echo "  --effort  Reasoning effort (low|medium|high)" ;;
+  "models") printf 'gemini-3.1-pro-high\tGemini 3.1 Pro (High)\n'; printf 'gemini-3.5-flash-low\tGemini 3.5 Flash (Low)\n' ;;
   *) exit 0 ;;
 esac
 AGY
@@ -1576,9 +1909,61 @@ out="$(env HOME="$PWD/home" XDG_CACHE_HOME="$PWD/cache" AGY_PREFLIGHT_NO_CACHE=1
 printf '%s' "$out" > preflight.json
 assert_contains "preflight.json" '"backend":"agy"'
 assert_contains "preflight.json" '"status":"ok"'
-assert_contains "preflight.json" '"default_model":"Gemini 3.1 Pro (High)"'
+assert_contains "preflight.json" '"default_model":"gemini-3.1-pro-high"'
+assert_contains "preflight.json" '"display_name":"Gemini 3.1 Pro (High)"'
+assert_contains "preflight.json" '"reasoning_efforts":["low","medium","high"]'
 assert_contains "preflight.json" '"workspace_mcp_registered":true'
-assert_exit0 python3 -c "import json; d=json.load(open('preflight.json')); assert d['preflight_schema'] == 2"
+assert_contains "preflight.json" '"name":"workspace-write","status":"blocked","reason":"r14_oauth_authentication_and_real_model_call_not_run"'
+assert_contains "preflight.json" '"detached_worktree_required":true'
+assert_contains "preflight.json" '"isolated_runtime":true'
+assert_contains "preflight.json" '"seatbelt_available":true'
+assert_exit0 python3 -c "import json; d=json.load(open('preflight.json')); assert d['preflight_schema'] == 14; assert d['external_capsule']['contract_version'] == 5; assert d['external_capsule']['runtime_detected'] is False; assert d['external_capsule']['promotion_ready'] is False"
+
+perl -pi -e 's/r14_oauth_authentication_and_real_model_call_not_run/r5_live_seatbelt_probe_passed_review_pending/' \
+  cache/codex-toolkit/agy-preflight-cache.json
+out="$(env HOME="$PWD/home" XDG_CACHE_HOME="$PWD/cache" \
+  PATH="$PWD/bin:$PYTHON_BIN_DIR:/usr/bin:/bin" bash "$SCRIPTS/agy-preflight.sh" 2>/dev/null)"
+printf '%s' "$out" > policy-refreshed.json
+assert_contains "policy-refreshed.json" '"reason":"r14_oauth_authentication_and_real_model_call_not_run"'
+assert_not_contains "policy-refreshed.json" 'r5_live_seatbelt_probe_passed_review_pending'
+
+cat > bin/container <<'CONTAINER'
+#!/usr/bin/env bash
+printf '%s\n' invoked > "$FAKE_CONTAINER_INVOKED_FILE"
+case "${1:-}" in
+  --version) printf 'container "0.9.0"\033[31m\n' ;;
+  *) printf '%s\n' 'fake runtime must never be launched by preflight' >&2; exit 91 ;;
+esac
+CONTAINER
+chmod +x bin/container
+out="$(env HOME="$PWD/home" XDG_CACHE_HOME="$PWD/cache" AGY_PREFLIGHT_NO_CACHE=1 \
+  FAKE_CONTAINER_INVOKED_FILE="$PWD/container-invoked" \
+  PATH="$PWD/bin:$PYTHON_BIN_DIR:/usr/bin:/bin" bash "$SCRIPTS/agy-preflight.sh" 2>/dev/null)"
+printf '%s' "$out" > runtime-detected.json
+assert_contains "runtime-detected.json" '"runtime_detected":true'
+assert_contains "runtime-detected.json" '"runtime_usable":false'
+assert_contains "runtime-detected.json" '"promotion_ready":false'
+assert_contains "runtime-detected.json" '"reason":"r14_capsule_evidence_missing"'
+assert_contains "runtime-detected.json" '"sandbox_levels":[]'
+assert_no_file "container-invoked"
+assert_exit0 python3 -c "import json; d=json.load(open('runtime-detected.json')); assert all(c['status'] == 'unknown' for c in d['external_capsule']['capabilities'])"
+
+cat > bin/agy <<'AGY'
+#!/usr/bin/env bash
+case "$1" in
+  "--version") echo "agy 1.1.3" ;;
+  "--help") echo "  --effort  Reasoning effort (low|medium|high)" ;;
+  "models") printf 'gemini-3.6-flash-high\tGemini 3.6 Flash (High)\n' ;;
+  *) exit 0 ;;
+esac
+AGY
+chmod +x bin/agy
+out="$(env HOME="$PWD/home" XDG_CACHE_HOME="$PWD/cache" \
+  PATH="$PWD/bin:$PYTHON_BIN_DIR:/usr/bin:/bin" bash "$SCRIPTS/agy-preflight.sh" 2>/dev/null)"
+printf '%s' "$out" > refreshed.json
+assert_contains "refreshed.json" '"agy_version":"agy 1.1.3"'
+assert_contains "refreshed.json" '"default_model":"gemini-3.6-flash-high"'
+assert_not_contains "refreshed.json" 'gemini-3.1-pro-high'
 
 cat > bin/agy <<'AGY'
 #!/usr/bin/env bash
@@ -1593,6 +1978,7 @@ out="$(env HOME="$PWD/home" XDG_CACHE_HOME="$PWD/cache" AGY_PREFLIGHT_NO_CACHE=1
   PATH="$PWD/bin:$PYTHON_BIN_DIR:/usr/bin:/bin" bash "$SCRIPTS/agy-preflight.sh" 2>/dev/null)"
 printf '%s' "$out" > timeout.json
 assert_contains "timeout.json" '"error_code":"agy_probe_timeout"'
+assert_contains "timeout.json" '"name":"workspace-write","status":"blocked","reason":"r14_oauth_authentication_and_real_model_call_not_run"'
 assert_exit0 python3 -c "import json; json.load(open('timeout.json'))"
 
 cleanup

@@ -1,7 +1,7 @@
 ---
 name: agy
-description: Delegate a prompt directly to Antigravity CLI with bounded execution and shared job tracking
-argument-hint: "[--model <name>] [--sandbox read-only|workspace-write|danger-full-access] [--background] [--resume <conversation-id>] <prompt>"
+description: Run one verified Antigravity workspace-write task through the R16 external capsule
+argument-hint: "--project default-cli-project [--model <slug>] [--effort low|medium|high] [--wait] <prompt>"
 allowed-tools:
   - Bash
   - AskUserQuestion
@@ -9,9 +9,9 @@ allowed-tools:
 
 # /cc-suite:agy
 
-Send a prompt to Antigravity CLI (`agy`) through the cc-suite runner. This is
-the direct Claude → agy delegation surface; it is separate from Codex-backed
-audit and implementation commands.
+Run one Antigravity CLI task through the verified R16 Apple Container boundary.
+This command exposes only `workspace-write`; `read-only`, unrestricted access,
+resume, additional directories, and background execution remain blocked.
 
 ## User Input
 
@@ -21,53 +21,71 @@ $ARGUMENTS
 
 ## Workflow
 
-### Step 1: Parse the request
+### 1. Parse exact public arguments
 
-Extract these optional flags from `$ARGUMENTS` and leave the remaining text as
-the prompt:
+Accept only:
 
-- `--model <name>` — pass the complete model display name, including effort
-  suffixes such as `Gemini 3.1 Pro (High)`
-- `--sandbox <read-only|workspace-write|danger-full-access>` — default
-  `read-only`
-- `--background` or `--wait` — default `--wait`
-- `--resume <conversation-id>` — continue a prior agy conversation
+- `--project default-cli-project` — required and must be this exact value.
+- `--model <slug>` — optional; it must exactly match a model slug returned by preflight.
+- `--effort low|medium|high` — optional; reject a value that conflicts with a
+  model suffix already ending in `-low`, `-medium`, or `-high`.
+- `--wait` — optional and the only execution form. Reject `--background`.
+- the remaining non-empty text is the prompt.
 
-If the prompt is empty, ask the user what they want agy to do and stop if they
-do not provide one.
+Reject resume, `--mode`, `--add-dir`, `read-only`, and
+`danger-full-access`. Do not infer another project or workspace.
 
-### Step 2: Choose a model when needed
+### 2. Require current R16 preflight
 
-If `--model` was omitted, run:
+Run without cache:
 
 ```bash
-bash "${CLAUDE_PLUGIN_ROOT}/scripts/agy-preflight.sh"
+AGY_PREFLIGHT_NO_CACHE=1 bash "${CLAUDE_PLUGIN_ROOT}/scripts/agy-preflight.sh"
 ```
 
-If preflight returns an error, report its `error` and `error_code` and stop.
-Otherwise use `default_model`. Do not ask for a reasoning-effort setting: agy
-encodes effort in the model display name.
+Stop unless all of these fields are present in the single JSON result:
 
-### Step 3: Run the request
+- `status` is `ok`;
+- `agy_version` is `1.1.14`;
+- `sandbox_levels` contains `workspace-write`;
+- the `workspace-write` access mode has status `verified` and reason
+  `r16_external_workspace_write_verified`;
+- `external_capsule.promotion_ready` is `true`;
+- `~/.config/cc-suite/agy-r16-serving-evidence.json` exists, contains
+  `"serving_path_verified":true`, and is for AGY `1.1.14`;
+- `oauth_volume` matches `cc-suite-agy-oauth-[a-f0-9]{16}`.
 
-Follow `commands/shared/agy-call.md` and invoke:
+If no model was supplied, use `default_model`. Never use a display label as the
+model argument.
+
+### 3. Execute only the released wrapper
+
+Run the following in the current workspace, preserving the prompt as one exact
+argument and adding `--effort` only when supplied:
 
 ```bash
-node "${CLAUDE_PLUGIN_ROOT}/scripts/agy-runner.mjs" \
-  --kind agy \
-  --model "{chosen_model}" \
-  --sandbox {chosen_sandbox} \
+node "${CLAUDE_PLUGIN_ROOT}/scripts/agy-public-runner.mjs" \
+  --project default-cli-project \
+  --model <exact-model-slug> \
   --timeout-ms 900000 \
-  {--background if selected} \
-  {--resume "{conversation_id}" if selected} \
-  --summary "agy: {short prompt summary}" \
-  -- "{prompt}"
+  -- <exact-prompt>
 ```
 
-Parse the single JSON object from stdout. For a foreground call, display
-`rawOutput`, `jobId`, `status`, and `threadId`. For a background call, return
-the queued `jobId` and tell the user to use `/cc-suite:status`,
-`/cc-suite:result`, or `/cc-suite:cancel`.
+Do not call `agy` directly. Do not call the runner's candidate flags. Do not
+substitute a host path for a container tool target; AGY sees the current
+worktree as `/workspace`.
 
-On `failed` or `stalled`, report the error and job id. Do not retry the same
-request automatically; the runner has already recorded the diagnostic log.
+### 4. Report the evidence boundary
+
+Treat the wrapper's JSON as authoritative. A successful result must include:
+
+- `status: completed` and a non-null `threadId`;
+- one or more `workspaceChanges`;
+- `r16Evidence.runtimeResourcesCleaned: true`;
+- `r16Evidence.mutationBinding.ready: true`;
+- transcript tool targets, content hashes, and the same `runId` in mutation
+  bindings;
+- a bounded OAuth token merge result.
+
+Any missing field, failed cleanup, extra mutation, or non-zero exit is a failed
+task. Report the exact `errorCode`; never reinterpret it as success.

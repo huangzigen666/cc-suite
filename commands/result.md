@@ -58,6 +58,10 @@ _Job: `{id}` | Thread: `{threadId}` | Run `/continue {threadId}` to follow up._
 ```
 
 If the job failed, show the error message instead of the raw output.
+For `failed`, `stalled`, `cancelled`, or recovery-generated `aborted` AGY jobs,
+also show the persisted
+`workspaceChanges` inventory. A non-completed status does not imply rollback or
+an unchanged worktree.
 
 ### Step 4: Offer next steps
 

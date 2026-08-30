@@ -169,7 +169,9 @@ export function resolveResultJob(cwd, reference) {
     (j) =>
       j.status === "completed" ||
       j.status === "failed" ||
-      j.status === "cancelled"
+      j.status === "stalled" ||
+      j.status === "cancelled" ||
+      j.status === "aborted"
   );
 
   if (reference) {
