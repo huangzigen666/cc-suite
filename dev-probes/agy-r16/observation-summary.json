@@ -26,6 +26,40 @@
     "capsuleIndex": "sha256:5a1fae53d2d35098c261460144675989f47712c0ab28e0dc4587a50c6d2932d1",
     "capsuleArm64": "sha256:d9bcdf32cfe312918c225bba33d6951225a2c455deff443fc912baa541263c27"
   },
+  "buildSource": {
+    "committed": true,
+    "directory": "dev-probes/agy-r16/capsule",
+    "agyVersion": "1.1.14",
+    "supervisorReused": {
+      "source": "dev-probes/agy-r13/agy-supervisor.c",
+      "sha256": "sha256:d2347471c7d9e1837ed8867915a7344f8bbb4f90ce39a953309cdc00de24d95e",
+      "changedForR16": false
+    },
+    "bootstrapReceiverReused": {
+      "source": "dev-probes/agy-r14/capsule/bootstrap-receiver.c",
+      "sha256": "sha256:c5157ca899418bc66912fc06519ace208541db5c6e9c4fccc6d2f7b63dc277aa",
+      "changedForR16": false
+    },
+    "entrypointReused": {
+      "source": "dev-probes/agy-r14/capsule/entrypoint.sh",
+      "sha256": "sha256:d9f0aab94a877243a59766dfca3fd71d70a8de18721efc40fb73b3850132820c",
+      "changedForR16": false
+    },
+    "r16Files": {
+      "Dockerfile": "sha256:bd3ad21505635f6d24fa298463a54a20810ff36ed49e7bbce4ede698f7c20c82",
+      "entrypoint.sh": "sha256:eff3e4502fbcf72abd94d9c7ebaa3fc936d7e506963a0a4fa0dcc2d5d4c2bf24",
+      "probe.sh": "sha256:40d9fd9ec32f4fa157ad6d911efdb751e1a6b9a9a91f6c0f6ba37b04bb98b7f8",
+      "README.md": "sha256:cc6a3cfe6e3d943149b37b27adf4e1cc2afa5760f5433fe21cc03fbfda73c575",
+      "input/.gitignore": "sha256:240a3e0d37d2e86b614063f5347eb02d4f99ca6c254de6b82871ff8d95532a7d"
+    },
+    "vendoredBinary": {
+      "path": "dev-probes/agy-r16/capsule/input/antigravity",
+      "committed": false,
+      "gitignored": true,
+      "note": "Independently verified Linux ARM64 AGY 1.1.14 binary; its SHA-256 is recorded host-side at build time, not in the repository (R13/R14 precedent)."
+    },
+    "note": "R16 capsule build source committed so the pinned images.* digests are traceable to reviewable source, closing the fourth open condition in dev-docs/agy-workspace-write-promotion.md. The exact OCI manifest digests in images were produced host-side; this source plus the recorded binary SHA-256 reproduce the build input, but transitive APT resolution is not snapshot-pinned, so the digest is bound at build time, not reconstructed in-repo."
+  },
   "openConditions": [
     "serving canary is neither run-bound nor expiring",
     "no counted independent security review since R11",
@@ -37,5 +71,5 @@
     "egressAddressWithheld": true,
     "runnerJobIdWithheld": true
   },
-  "rawEvidenceLocation": "host-local, outside the repository, intentionally not committed"
+  "rawEvidenceLocation": "build source committed under dev-probes/agy-r16/capsule; host-local run evidence (run nonce, logs) remains outside the repository, not committed"
 }

@@ -1,6 +1,6 @@
 # AGY workspace-write promotion gate
 
-Status: **R16 RELEASED, HOST-SCOPED / FOUR OPEN CONDITIONS** on Antigravity
+Status: **R16 RELEASED, HOST-SCOPED / THREE OPEN CONDITIONS** on Antigravity (build source committed; see item 5 note)
 CLI 1.1.14 with Apple `container` 1.2.2.
 
 `workspace-write` appears in released `sandbox_levels` only on the exact
@@ -78,6 +78,13 @@ proven in R15. It is released host-scoped, not fully promoted:
    external PID 1 supervisor and privilege-drop design already reviewed
    in R13/R14 is reused, and no code change to that supervisor is claimed
    for R16.
+
+   Build-source follow-up: the R16 capsule build source is now committed under
+   `dev-probes/agy-r16/capsule/` (Dockerfile, entrypoint.sh, probe.sh, README.md,
+   input/.gitignore) with per-file SHA-256 recorded in `observation-summary.json`
+   `buildSource`. The R13 `agy-supervisor.c` and R14 `bootstrap-receiver.c` /
+   `entrypoint.sh` are referenced unchanged. This closes the fourth open condition
+   originally recorded here.
 6. Egress during the live run was `consumer-mobile-nat`; the resolved
    address was not retained in any repository artifact.
 7. Open conditions carried forward from `observation-summary.json`, none
@@ -85,8 +92,9 @@ proven in R15. It is released host-scoped, not fully promoted:
    - the serving canary is neither run-bound nor expiring;
    - no independent security review has been counted since before R11;
    - region/account independence is untested;
-   - the R16 capsule's build source is not committed or hashed in this
-     repository (item 5 above).
+   - the R16 capsule's build source — CLOSED: committed and hashed under
+     `dev-probes/agy-r16/capsule/` (build-source follow-up above); the same
+     R13/R14 supervisor is reused unchanged.
 
 Promotion remains a host-scoped, conditional release, not a general
 availability claim. `sandbox_levels` reverts to empty the moment any of
