@@ -91,7 +91,14 @@ contents:
 5. exact client, proxy, network, and test-volume lifecycle is accounted for.
 
 The request uses `default-cli-project` only because the capsule has no host
-workspace and the task is credential validation. That default remains forbidden
-in the released runner. Immediate success does not prove token refresh; keep the
-volume only for a later expiry/refresh probe or delete the exact audited volume
-when R15 evidence collection is closed.
+workspace and the task is credential validation. That default was, at the
+time this probe ran, rejected by the Seatbelt candidate runner, which uses
+AGY's own project-scoped permission grants as its boundary and treats a
+silent fallback to `default-cli-project` as a failed isolation. It has
+since also been adopted, unchanged in meaning here, as the required and
+harmless project literal for the unrelated R16 external-capsule runner,
+which does not use AGY's permission engine at all (see the R16 decision
+record in `dev-docs/agy-workspace-write-promotion.md`). Immediate success
+does not prove token refresh; keep the volume only for a later
+expiry/refresh probe or delete the exact audited volume when R15 evidence
+collection is closed.

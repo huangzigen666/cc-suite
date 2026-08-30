@@ -1,12 +1,98 @@
 # AGY workspace-write promotion gate
 
-Status: **R15 AUTH + REAL MODEL CALL VERIFIED / TOKEN REFRESH PENDING** on
-Antigravity CLI 1.1.11 with Apple `container` 1.2.2.
+Status: **R16 RELEASED, HOST-SCOPED / FOUR OPEN CONDITIONS** on Antigravity
+CLI 1.1.14 with Apple `container` 1.2.2.
 
-`workspace-write` appears in neither released `sandbox_levels` nor
-`candidate_sandbox_levels`. The user-facing `/agy` command must not pass
-`--candidate-workspace-write`; that switch remains only for internal
-fail-closed evidence gathering.
+`workspace-write` appears in released `sandbox_levels` only on the exact
+host where `agy-r16-preflight.mjs` reports `promotion_ready:true` and the
+local serving-evidence canary is current for AGY 1.1.14; every other host
+keeps both `sandbox_levels` and `candidate_sandbox_levels` empty. The
+user-facing `/agy` command always goes through this gated path
+(`scripts/agy-public-runner.mjs`) and never accepts `--candidate-workspace-write`
+or `--candidate-external-workspace-write`; those switches remain only for
+internal fail-closed evidence gathering.
+
+## R16 decision record
+
+R16 replaces AGY's own permission engine as the workspace-write boundary
+with the Apple Container VM proven in R11-R14 and the OAuth persistence
+proven in R15. It is released host-scoped, not fully promoted:
+`dev-probes/agy-r16/observation-summary.json` explicitly records
+`status:"released-host-scoped"` and `promotionEligible:false`.
+
+1. R15 item 10 is retracted as it applies to R16, and only as it applies to
+   R16. It stated that `default-cli-project` "remains rejected by the
+   released runner and cannot satisfy the project/workspace promotion
+   contract." That statement was written about the Seatbelt candidate path
+   (`executeAgySeatbelt` / `assertExecutionBoundary` in `agy-runner.mjs`),
+   where AGY's own project-scoped permission grants are the tested
+   boundary and a silent fallback to `default-cli-project` means the
+   isolation did not take effect — the exact defect R4 documented. R16
+   does not use that code path or that boundary. The R16 candidate invokes
+   AGY with `--dangerously-skip-permissions`, so AGY's own grant engine is
+   not the enforcement layer at all; the write boundary is the Apple
+   Container VM's bind mount limited to the workspace, a read-only-path
+   deny on `/workspace/.git`, a read-only container root, `--tmpfs /tmp`,
+   and the R13/R14 PID 1 privilege-drop supervisor. `default-cli-project`
+   is AGY's own label for "no dedicated project configured," which is
+   correct and expected inside a fresh, disposable capsule that has never
+   had a project created in it. It carries no filesystem permission in
+   R16 and is pinned only as an audited literal folded into the run
+   profile hash. Item 10 remains true, unchanged, and in force for the
+   Seatbelt candidate path it was written about; only its application to
+   the external-capsule path is withdrawn.
+2. The R16 client reuses the R15-proven OAuth volume (one labeled,
+   size- and age-audited named volume mounted at `/home/agy`) and the
+   R15-proven exact-host allowlist proxy on the same audited builtin
+   `default` NAT network, so authentication and destination egress are
+   not re-derived from scratch. Both client and proxy run with the R13/R14
+   privilege-drop and lifecycle-attribution supervisor; the client's root
+   is read-only with no DNS and only the workspace bind mount is writable.
+3. A completed run's filesystem effect is bound, not merely observed:
+   `git status --porcelain` on the host worktree after the run is compared
+   against the tool targets the transcript reports, renames/deletes are
+   rejected, and every claimed target is re-resolved on the host to
+   confirm it is a real file inside the workspace with link count 1 before
+   its content hash is recorded. A live run wrote exactly one file inside
+   `/workspace`, matched by this binding, and produced diagnostic
+   `AGY_AB_114_OK`.
+4. Preflight schema 14 only reports `sandbox_levels:["workspace-write"]`
+   when four independent signals hold on the exact release host: `agy
+   --version` is `1.1.14`, `container` resolves to the audited binary
+   path, `agy-r16-preflight.mjs` returns `promotion_ready:true` (empty
+   runtime, pinned image index/ARM64 digests, exactly one ready OAuth
+   volume, a valid host proxy contract), and a separate, out-of-band
+   `~/.config/cc-suite/agy-r16-serving-evidence.json` reports
+   `serving_path_verified:true` for `1.1.14`. Any other host, or any
+   missing signal, keeps `sandbox_levels` empty with an explicit blocked
+   reason. The serving-evidence file is a host-local canary, not run-bound
+   evidence; it does not expire and must be revalidated by a human before
+   it is trusted.
+5. The R16 capsule image and its ARM64 manifest are pinned by digest and
+   audited against the running `container` daemon before every release
+   run. Unlike R13 and R14, no Dockerfile, entrypoint script, or
+   supervisor/entrypoint source SHA-256 for this image is committed to
+   this repository; the pinned digest can be host-verified against what
+   is currently loaded but not traced to reviewable source here. This is
+   recorded as a known limitation, not a disproven control: the same
+   external PID 1 supervisor and privilege-drop design already reviewed
+   in R13/R14 is reused, and no code change to that supervisor is claimed
+   for R16.
+6. Egress during the live run was `consumer-mobile-nat`; the resolved
+   address was not retained in any repository artifact.
+7. Open conditions carried forward from `observation-summary.json`, none
+   of which is closed by this record:
+   - the serving canary is neither run-bound nor expiring;
+   - no independent security review has been counted since before R11;
+   - region/account independence is untested;
+   - the R16 capsule's build source is not committed or hashed in this
+     repository (item 5 above).
+
+Promotion remains a host-scoped, conditional release, not a general
+availability claim. `sandbox_levels` reverts to empty the moment any of
+the four preflight signals stops holding, and the four open conditions
+above must be closed, or explicitly re-accepted with a stated reason,
+before this record can claim more than `released-host-scoped`.
 
 ## R15 decision record
 
