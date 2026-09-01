@@ -1,5 +1,4 @@
 ---
-name: bug-analyze
 description: Root cause analysis for user-described bugs using Codex
 argument-hint: "<bug description> [--background | --wait]"
 ---
@@ -55,7 +54,7 @@ Identify scope using symptoms and keywords:
    - What is the data flow?
    - What are the dependencies?
 
-If the bug description references specific files or paths, use `commands/shared/scope-parse.md` for skip pattern enforcement against `{config_skip_patterns}`.
+If the bug description references specific files or paths, use `commands/shared/scope-parse.md` for skip pattern enforcement against `{config_skip_patterns}`. When the analysis is unscoped (no bounded file list), instead state `{config_skip_patterns}` in the prompt as paths Codex must not consider or modify.
 
 ### Step 3: Deep Analysis with Codex
 

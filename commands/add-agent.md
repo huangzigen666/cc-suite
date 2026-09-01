@@ -1,5 +1,4 @@
 ---
-name: add-agent
 description: Create a new cc-suite advisor agent — a project-scoped value-over-rules persona registered as an MCP server for Claude and Codex, then available to agy after the MCP projection is refreshed. Optional preset arg copies a curated template.
 argument-hint: "[preset-name | --custom]"
 ---
@@ -42,6 +41,8 @@ If using a preset, copy it to `.cc-suite/agents/<name>.md`:
 mkdir -p .cc-suite/agents
 cp "${CLAUDE_PLUGIN_ROOT}/templates/agents/<preset-name>.md" ".cc-suite/agents/<preset-name>.md"
 ```
+
+If `<preset-name>` does not match a file under `${CLAUDE_PLUGIN_ROOT}/templates/agents/`, stop before copying and report: `No preset named '<preset-name>'. Available presets: {list from the table above}. Re-run with one of those names or with --custom.`
 
 If the file already exists, ask the user whether to overwrite, edit, or cancel.
 

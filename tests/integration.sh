@@ -18,8 +18,11 @@ else
 fi
 
 # ── assert helpers ───────────────────────────────────────────────────────────
-ok_msg()   { ((PASS++));   printf "${G}  ✓${N} %s\n" "$*"; }
-fail_msg() { ((FAIL++));   ERRORS+=("$*"); printf "${R}  ✗${N} %s\n" "$*"; }
+# Arithmetic assignment, not ((PASS++)): under `set -e` a post-increment from 0
+# evaluates to 0, which bash reports as exit status 1 — so the suite aborted on
+# its first *passing* assertion and never reached T02.
+ok_msg()   { PASS=$((PASS + 1)); printf "${G}  ✓${N} %s\n" "$*"; }
+fail_msg() { FAIL=$((FAIL + 1)); ERRORS+=("$*"); printf "${R}  ✗${N} %s\n" "$*"; }
 section()  { printf "\n${B}%s${N}\n" "$*"; }
 
 assert_file() {
@@ -90,8 +93,43 @@ assert_count() {
 
 # ── temp dir management ───────────────────────────────────────────────────────
 TMP=""
-make_tmp() { TMP="$(mktemp -d)"; cd "$TMP"; }
-cleanup()   { cd /; rm -rf "${TMP:-}"; TMP=""; }
+# Every test runs under an isolated HOME. Several scripts write machine-global
+# targets (~/.kimi/mcp.json, ~/.codex/…), and a bare `bridge_tools.py --unbridge`
+# iterates every registry profile — so without this a suite run could delete the
+# developer's real Kimi configuration. Tests that need a specific HOME still
+# override it per command.
+REAL_HOME="$HOME"
+make_tmp() {
+  TMP="$(mktemp -d)"
+  cd "$TMP"
+  mkdir -p "$TMP/home"
+  HOME="$TMP/home"
+  export HOME
+}
+cleanup() {
+  cd /
+  rm -rf "${TMP:-}"
+  TMP=""
+  HOME="$REAL_HOME"
+  export HOME
+}
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# T00  harness — every test runs under an isolated HOME
+# ═══════════════════════════════════════════════════════════════════════════════
+# The suite exercises scripts that write machine-global paths (~/.kimi/mcp.json,
+# ~/.codex/…) and a teardown that iterates every registry profile. If HOME ever
+# stops being redirected, a suite run silently destroys the developer's real
+# configuration — so assert the redirection itself rather than trusting it.
+section "T00: harness — HOME is isolated inside each test"
+make_tmp
+if [ "$HOME" != "$REAL_HOME" ]; then ok_msg "HOME redirected away from the real home"
+else fail_msg "HOME is the developer's real home — a global-config test would destroy it"; fi
+if [ "$HOME" = "$TMP/home" ] && [ -d "$HOME" ]; then ok_msg "HOME points at the per-test sandbox"
+else fail_msg "HOME is not the per-test sandbox ($HOME)"; fi
+cleanup
+if [ "$HOME" = "$REAL_HOME" ]; then ok_msg "cleanup restores the real HOME"
+else fail_msg "cleanup left HOME pointing at a deleted directory"; fi
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # T01  init.sh — fresh project (no CLAUDE.md, no AGENTS.md)
@@ -110,14 +148,14 @@ assert_file ".codex/config.toml"
 assert_file ".gitignore"
 assert_contains ".gitignore" "# >>> cc-suite >>>"
 assert_contains ".gitignore" "# <<< cc-suite <<<"
-assert_file ".codex/.cc-suite.provenance"
-assert_contains ".codex/.cc-suite.provenance" "CC_SUITE_CREATED_CLAUDE=1"
+assert_file ".cc-suite/provenance"
+assert_contains ".cc-suite/provenance" "CC_SUITE_CREATED_CLAUDE=1"
 
 # Consumer Gemini CLI access moved to `agy` on 2026-06-18; agy reads AGENTS.md
 # natively. init must no longer create a GEMINI.md pointer or .gemini/ scaffolding.
 assert_no_file "GEMINI.md"
 assert_no_dir  ".gemini"
-assert_not_contains ".codex/.cc-suite.provenance" "CC_SUITE_CREATED_GEMINI"
+assert_not_contains ".cc-suite/provenance" "CC_SUITE_CREATED_GEMINI"
 assert_not_contains ".gitignore" ".gemini/"
 
 cleanup
@@ -136,11 +174,11 @@ assert_contains "AGENTS.md" "# My Project"
 assert_contains "AGENTS.md" "Hello world."
 assert_file_content "CLAUDE.md" "@AGENTS.md"
 # Original saved verbatim for perfect restore
-assert_file ".codex/.cc-suite-original-claude.md"
-assert_contains ".codex/.cc-suite-original-claude.md" "# My Project"
-assert_contains ".codex/.cc-suite.provenance" "CLAUDE_MIGRATED=1"
+assert_file ".cc-suite/original-claude.md"
+assert_contains ".cc-suite/original-claude.md" "# My Project"
+assert_contains ".cc-suite/provenance" "CLAUDE_MIGRATED=1"
 # CLAUDE_MIGRATED migration means CC_SUITE_CREATED_CLAUDE should NOT be set
-assert_not_contains ".codex/.cc-suite.provenance" "CC_SUITE_CREATED_CLAUDE=1"
+assert_not_contains ".cc-suite/provenance" "CC_SUITE_CREATED_CLAUDE=1"
 
 cleanup
 
@@ -159,7 +197,7 @@ assert_not_contains "AGENTS.md" "Hello"   # no CLAUDE.md body leaked in
 # CLAUDE.md untouched
 assert_file_content "CLAUDE.md" "@AGENTS.md"
 # No migration flag
-assert_not_contains ".codex/.cc-suite.provenance" "CLAUDE_MIGRATED=1"
+assert_not_contains ".cc-suite/provenance" "CLAUDE_MIGRATED=1"
 
 cleanup
 
@@ -176,7 +214,7 @@ assert_exit0 bash "$SCRIPTS/init.sh"
 assert_contains "CLAUDE.md" "# Extra content that must survive"
 assert_contains "CLAUDE.md" "@AGENTS.md"
 # No migration
-assert_not_contains ".codex/.cc-suite.provenance" "CLAUDE_MIGRATED=1"
+assert_not_contains ".cc-suite/provenance" "CLAUDE_MIGRATED=1"
 
 cleanup
 
@@ -618,9 +656,12 @@ section "T23: unbridge.sh — removes cc-suite-created CLAUDE.md"
 make_tmp
 mkdir -p .codex
 
-echo "# AGENTS content" > AGENTS.md
+# A genuinely cc-suite-created AGENTS.md carries the init.sh scaffold line;
+# unbridge keys its delete decision on that marker, not on the CLAUDE flag.
+printf '# Project Instructions\n\nNever modify `CLAUDE.md` directly — it only imports `AGENTS.md`.\n' > AGENTS.md
 printf "@AGENTS.md\n" > CLAUDE.md
-printf "CC_SUITE_CREATED_CLAUDE=1\n" > .codex/.cc-suite.provenance
+mkdir -p .cc-suite
+printf "CC_SUITE_CREATED_CLAUDE=1\n" > .cc-suite/provenance
 
 assert_exit0 bash "$SCRIPTS/unbridge.sh"
 
@@ -630,9 +671,59 @@ assert_no_file "CLAUDE.md"    # cc-suite created it — remove on unbridge
 cleanup
 
 # ═══════════════════════════════════════════════════════════════════════════════
+# T23b  unbridge.sh — preserves a pre-existing AGENTS.md (no scaffold marker)
+# ═══════════════════════════════════════════════════════════════════════════════
+# CC_SUITE_CREATED_CLAUDE=1 records that init created CLAUDE.md — it says
+# nothing about AGENTS.md. When init found a user-authored AGENTS.md, only the
+# CLAUDE.md import belongs to cc-suite; deleting AGENTS.md would lose user
+# content. The pre-fix behavior did exactly that.
+section "T23b: unbridge.sh — preserves pre-existing AGENTS.md"
+make_tmp
+mkdir -p .codex
+
+echo "# user-authored AGENTS content" > AGENTS.md
+printf "@AGENTS.md\n" > CLAUDE.md
+mkdir -p .cc-suite
+printf "CC_SUITE_CREATED_CLAUDE=1\n" > .cc-suite/provenance
+
+assert_exit0 bash "$SCRIPTS/unbridge.sh"
+
+assert_file "AGENTS.md"       # user content survives unbridge
+assert_contains "AGENTS.md" "user-authored AGENTS content"
+assert_no_file "CLAUDE.md"    # the import cc-suite created is still removed
+
+cleanup
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# T23c  unbridge.sh — recorded CC_SUITE_CREATED_AGENTS beats the content heuristic
+# ═══════════════════════════════════════════════════════════════════════════════
+# A current init.sh records CC_SUITE_CREATED_AGENTS=1 whenever it wrote
+# AGENTS.md itself. Unbridge must key on that record, not on mutable file
+# content: here the scaffold marker line has been edited out of AGENTS.md,
+# which would fool the legacy heuristic into keeping a cc-suite-created file.
+section "T23c: unbridge.sh — provenance-recorded AGENTS.md removed despite edits"
+make_tmp
+mkdir -p .codex
+
+printf '# Project Instructions\n\nEdited: the scaffold marker line is gone.\n' > AGENTS.md
+printf "@AGENTS.md\n" > CLAUDE.md
+mkdir -p .cc-suite
+printf "CC_SUITE_CREATED_CLAUDE=1\nCC_SUITE_CREATED_AGENTS=1\n" > .cc-suite/provenance
+
+assert_exit0 bash "$SCRIPTS/unbridge.sh"
+
+assert_no_file "AGENTS.md"    # provenance says init created it — removed
+assert_no_file "CLAUDE.md"
+
+cleanup
+
+# ═══════════════════════════════════════════════════════════════════════════════
 # T24  unbridge.sh — CLAUDE_MIGRATED: restores original CLAUDE.md verbatim
 # ═══════════════════════════════════════════════════════════════════════════════
-section "T24: unbridge.sh — restores original CLAUDE.md via provenance backup"
+section "T24: unbridge.sh — restores original CLAUDE.md from LEGACY .codex/ paths"
+# Deliberately uses the pre-0.14 locations: repos initialized before cc-suite
+# state moved into .cc-suite/ must still unbridge cleanly. T24b covers the
+# current paths.
 make_tmp
 mkdir -p .codex
 
@@ -653,6 +744,50 @@ assert_no_file ".codex/.cc-suite-original-claude.md"
 cleanup
 
 # ═══════════════════════════════════════════════════════════════════════════════
+# T24b unbridge.sh — same restore via the current .cc-suite/ paths
+# ═══════════════════════════════════════════════════════════════════════════════
+section "T24b: unbridge.sh — restores original CLAUDE.md from .cc-suite/ paths"
+make_tmp
+mkdir -p .cc-suite
+
+printf "# My Original Project\n\nWith real content.\n" > .cc-suite/original-claude.md
+echo "# AGENTS.md content + cc-suite scaffolding" > AGENTS.md
+printf "@AGENTS.md\n" > CLAUDE.md
+printf "CLAUDE_MIGRATED=1\n" > .cc-suite/provenance
+
+assert_exit0 bash "$SCRIPTS/unbridge.sh"
+
+assert_no_file  "AGENTS.md"
+assert_file     "CLAUDE.md"
+assert_contains "CLAUDE.md" "# My Original Project"
+assert_contains "CLAUDE.md" "With real content."
+assert_no_file  ".cc-suite/original-claude.md"
+assert_no_file  ".cc-suite/provenance"
+assert_no_dir   ".cc-suite"          # emptied by unbridge, so removed
+
+cleanup
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# T24c unbridge.sh — keeps .cc-suite/ when the user has advisor agents there
+# ═══════════════════════════════════════════════════════════════════════════════
+section "T24c: unbridge.sh — preserves .cc-suite/agents/ while clearing its own state"
+make_tmp
+mkdir -p .cc-suite/agents
+
+printf -- "---\nname: reviewer\n---\nBe critical.\n" > .cc-suite/agents/reviewer.md
+echo "# AGENTS content" > AGENTS.md
+printf "@AGENTS.md\n" > CLAUDE.md
+printf "CC_SUITE_CREATED_CLAUDE=1\n" > .cc-suite/provenance
+
+assert_exit0 bash "$SCRIPTS/unbridge.sh"
+
+assert_no_file ".cc-suite/provenance"     # cc-suite's own state: gone
+assert_file    ".cc-suite/agents/reviewer.md"  # the user's advisor: untouched
+assert_dir     ".cc-suite"
+
+cleanup
+
+# ═══════════════════════════════════════════════════════════════════════════════
 # T25  unbridge.sh — no provenance, CLAUDE.md has own content → backup AGENTS.md
 # ═══════════════════════════════════════════════════════════════════════════════
 section "T25: unbridge.sh — backup when CLAUDE.md has own content (no provenance)"
@@ -660,7 +795,7 @@ make_tmp
 
 printf "# Own content\nNot going anywhere.\n" > CLAUDE.md
 printf "# AGENTS content\n" > AGENTS.md
-# no .codex/.cc-suite.provenance
+# no .cc-suite/provenance
 
 assert_exit0 bash "$SCRIPTS/unbridge.sh"
 
@@ -702,7 +837,8 @@ mkdir -p .codex
 printf "@AGENTS.md\n" > GEMINI.md
 echo "# AGENTS" > AGENTS.md
 printf "@AGENTS.md\n" > CLAUDE.md
-printf "CC_SUITE_CREATED_CLAUDE=1\nCC_SUITE_CREATED_GEMINI=1\n" > .codex/.cc-suite.provenance
+mkdir -p .cc-suite
+printf "CC_SUITE_CREATED_CLAUDE=1\nCC_SUITE_CREATED_GEMINI=1\n" > .cc-suite/provenance
 
 assert_exit0 bash "$SCRIPTS/unbridge.sh"
 
@@ -721,7 +857,8 @@ mkdir -p .codex
 printf "@AGENTS.md\n\n# Custom Gemini instructions\n" > GEMINI.md
 echo "# AGENTS" > AGENTS.md
 printf "@AGENTS.md\n" > CLAUDE.md
-printf "CC_SUITE_CREATED_CLAUDE=1\n" > .codex/.cc-suite.provenance
+mkdir -p .cc-suite
+printf "CC_SUITE_CREATED_CLAUDE=1\n" > .cc-suite/provenance
 # Note: CC_SUITE_CREATED_GEMINI is NOT set — user added content manually
 
 assert_exit0 bash "$SCRIPTS/unbridge.sh"
@@ -740,7 +877,8 @@ mkdir -p .codex
 
 echo "# AGENTS" > AGENTS.md
 printf "@AGENTS.md\n" > CLAUDE.md
-printf "CC_SUITE_CREATED_CLAUDE=1\n" > .codex/.cc-suite.provenance
+mkdir -p .cc-suite
+printf "CC_SUITE_CREATED_CLAUDE=1\n" > .cc-suite/provenance
 
 cat > .codex/hooks.json <<'JSON'
 {"_cc_bridge_version": "1", "hooks": {"SessionStart": [], "PreToolUse": []}}
@@ -761,7 +899,8 @@ mkdir -p .codex
 
 echo "# AGENTS" > AGENTS.md
 printf "@AGENTS.md\n" > CLAUDE.md
-printf "CC_SUITE_CREATED_CLAUDE=1\n" > .codex/.cc-suite.provenance
+mkdir -p .cc-suite
+printf "CC_SUITE_CREATED_CLAUDE=1\n" > .cc-suite/provenance
 
 cat > .codex/hooks.json <<'JSON'
 {"hooks": {"SessionStart": [], "PreToolUse": []}}
@@ -782,7 +921,8 @@ mkdir -p .codex
 
 echo "# AGENTS" > AGENTS.md
 printf "@AGENTS.md\n" > CLAUDE.md
-printf "CC_SUITE_CREATED_CLAUDE=1\n" > .codex/.cc-suite.provenance
+mkdir -p .cc-suite
+printf "CC_SUITE_CREATED_CLAUDE=1\n" > .cc-suite/provenance
 
 cat > .codex/config.toml <<'TOML'
 # My hand-written config
@@ -1339,7 +1479,7 @@ git add -A; git commit -qm init >/dev/null 2>&1
 
 assert_exit0 git ls-files --error-unmatch .mcp.json      # tracked before fix
 bash "$SCRIPTS/ensure_gitignore.sh" >/dev/null 2>&1
-assert_contains ".gitignore" "cc-suite-schema: 6"
+assert_contains ".gitignore" "cc-suite-schema: 7"
 assert_exit_nonzero git ls-files --error-unmatch .mcp.json   # now untracked
 assert_exit0 git check-ignore .mcp.json                      # now ignored
 assert_file ".mcp.json"                                      # working file kept
@@ -1386,7 +1526,7 @@ printf '# >>> cc-suite >>>\n# cc-suite-schema: 2\n.claude/settings.local.json\n#
 git add -A; git commit -qm init >/dev/null 2>&1
 
 bash "$SCRIPTS/ensure_gitignore.sh" >/dev/null 2>&1
-assert_contains ".gitignore" "cc-suite-schema: 6"
+assert_contains ".gitignore" "cc-suite-schema: 7"
 assert_count "# >>> cc-suite >>>" ".gitignore" 1   # single block, no duplication
 assert_exit_nonzero git ls-files --error-unmatch .mcp.json   # migrated + untracked
 assert_exit0 git check-ignore .mcp.json
@@ -1494,8 +1634,268 @@ printf '%s' "$out" > preflight.json
 assert_contains "preflight.json" '"default_model":"gpt-5.6-sol"'
 assert_contains "preflight.json" '"models":["gpt-5.6-sol","gpt-5.5"]'
 assert_contains "preflight.json" '"reasoning_efforts":["low","medium","high","xhigh","max","ultra"]'
-assert_exit0 python3 -c "import json; d=json.load(open('preflight.json')); assert d['preflight_schema'] == 3"
+assert_exit0 python3 -c "import json; d=json.load(open('preflight.json')); assert d['preflight_schema'] == 4"
 
+cleanup
+
+# ══════════ T54b  codex-preflight.sh — missing cache populated via exec ══════
+# `codex login --refresh` was removed in codex-cli 0.147.0; the CLI only writes
+# models_cache.json at session start. The preflight must trigger a minimal
+# `codex exec` when the cache is absent, and surface the reason when it fails.
+section "T54b: codex-preflight.sh — populates missing cache via codex exec"
+make_tmp
+
+mkdir -p bin home/.codex cache
+cat > bin/codex <<'CODEX'
+#!/usr/bin/env bash
+case "$1" in
+  "--version") echo "codex-cli 0.147.0" ;;
+  "login") echo "Logged in with ChatGPT" ;;
+  "exec")
+    mkdir -p "$HOME/.codex"
+    printf '{"models":[{"slug":"gpt-5.6-sol","display_name":"GPT-5.6-Sol","description":"Latest frontier agentic coding model","priority":1,"supported_reasoning_levels":[{"effort":"medium"},{"effort":"high"}]}]}\n' \
+      > "$HOME/.codex/models_cache.json"
+    echo "ok" ;;
+  *) exit 1 ;;
+esac
+CODEX
+chmod +x bin/codex
+
+PYTHON_BIN_DIR="$(dirname "$(command -v python3)")"
+out="$(env HOME="$PWD/home" XDG_CACHE_HOME="$PWD/cache" CODEX_PREFLIGHT_NO_CACHE=1 \
+  PATH="$PWD/bin:$PYTHON_BIN_DIR:/usr/bin:/bin" bash "$SCRIPTS/codex-preflight.sh" 2>stderr.log)"
+printf '%s' "$out" > preflight.json
+
+assert_contains "preflight.json" '"status":"ok"'
+assert_contains "preflight.json" '"default_model":"gpt-5.6-sol"'
+assert_file "home/.codex/models_cache.json"
+assert_contains "stderr.log" "Models cache populated successfully"
+
+# Failure path: exec cannot create the cache — the reason must reach stderr
+# and the error JSON must carry accurate guidance (login no longer helps).
+rm -f home/.codex/models_cache.json
+cat > bin/codex <<'CODEX'
+#!/usr/bin/env bash
+case "$1" in
+  "--version") echo "codex-cli 0.147.0" ;;
+  "login") echo "Logged in with ChatGPT" ;;
+  "exec") echo "stream error: quota exceeded" >&2; exit 1 ;;
+  *) exit 1 ;;
+esac
+CODEX
+chmod +x bin/codex
+
+out="$(env HOME="$PWD/home" XDG_CACHE_HOME="$PWD/cache" CODEX_PREFLIGHT_NO_CACHE=1 \
+  PATH="$PWD/bin:$PYTHON_BIN_DIR:/usr/bin:/bin" bash "$SCRIPTS/codex-preflight.sh" 2>stderr.log || true)"
+printf '%s' "$out" > preflight.json
+
+assert_contains "preflight.json" '"status":"error"'
+assert_contains "preflight.json" "No usable models cache"
+assert_contains "preflight.json" "codex exec"
+assert_contains "stderr.log" "stream error: quota exceeded"
+
+cleanup
+
+# ══════════ T53a  fence-aware config parsing and convergent repair ══════════
+# Four defects that shared one shape: a check or parser that reads a proxy for
+# the truth instead of the truth, so the tool reports a problem its own repair
+# cannot clear.
+section "T53a: config parsing and repair converge"
+
+# (a) `## Enabled Tools` inside a fenced block is documentation, not the section.
+make_tmp
+cat > .cc-suite.md <<'MD'
+# Config
+
+Document the section like this:
+
+```markdown
+## Enabled Tools
+
+- [x] claude
+```
+
+## Enabled Tools
+
+- [x] claude
+- [x] grok
+- [x] opencode
+MD
+enabled="$(python3 "$SCRIPTS/bridge_tools.py" --enabled 2>/dev/null | tr '\n' ' ')"
+if [ "$enabled" = "claude grok opencode " ]; then ok_msg "fenced example ignored; real selection parsed"
+else fail_msg "tool selection read from the fenced example: '$enabled'"; fi
+cleanup
+
+# (b) A hand-deleted entry is restored, and the run stays idempotent.
+make_tmp
+git init -q .
+bash "$SCRIPTS/ensure_gitignore.sh" >/dev/null 2>&1
+grep -v '^\.claude/settings\.local\.json$' .gitignore > .g && mv .g .gitignore
+bash "$SCRIPTS/ensure_gitignore.sh" >/dev/null 2>&1
+assert_contains ".gitignore" ".claude/settings.local.json"
+out="$(bash "$SCRIPTS/ensure_gitignore.sh" 2>&1)"
+case "$out" in
+  *"already has current cc-suite block"*) ok_msg "gitignore refresh is idempotent" ;;
+  *) fail_msg "gitignore rewritten on an unchanged tree: $out" ;;
+esac
+cleanup
+
+# (c) Becoming a plugin repo after the block was written must converge.
+make_tmp
+git init -q .
+printf '{"mcpServers":{"myserver":{"type":"stdio","command":"foo"}}}\n' > .mcp.json
+bash "$SCRIPTS/ensure_gitignore.sh" >/dev/null 2>&1
+mkdir -p .claude-plugin && printf '{"name":"p"}\n' > .claude-plugin/plugin.json
+bash "$SCRIPTS/ensure_gitignore.sh" >/dev/null 2>&1
+assert_contains ".gitignore" ".codex/prompts/"
+assert_contains ".gitignore" "GEMINI.md"
+cleanup
+
+# (d) A legacy codex-cli registration is cc-suite's, not a stranger's: treating
+# it as foreign left a plugin's .mcp.json tracked and shipping.
+make_tmp
+git init -q .
+mkdir -p .claude-plugin && printf '{"name":"p"}\n' > .claude-plugin/plugin.json
+printf '{"mcpServers":{"codex-cli":{"type":"stdio","command":"npx","args":["-y","@openai/codex-mcp"]}}}\n' > .mcp.json
+git add -A >/dev/null 2>&1
+git -c user.email=t@t -c user.name=t commit -qm init >/dev/null 2>&1
+bash "$SCRIPTS/ensure_gitignore.sh" >/dev/null 2>&1
+assert_contains ".gitignore" ".mcp.json"
+if git ls-files --error-unmatch .mcp.json >/dev/null 2>&1; then
+  fail_msg "legacy codex-cli .mcp.json left tracked — it ships to every installer"
+else ok_msg "legacy codex-cli .mcp.json untracked and ignored"; fi
+cleanup
+
+# (e) A control character in a mirrored server must not make diagnose disagree
+# with the file bridge_mcp.sh just wrote.
+make_tmp
+mkdir -p "$TMP/fakehome"
+python3 -c "
+import json
+json.dump({'mcpServers':{'tabby':{'type':'stdio','command':'node','args':['--eval','a\tb']}}}, open('.mcp.json','w'))
+"
+assert_exit0 bash "$SCRIPTS/bridge_mcp.sh"
+HOME="$TMP/fakehome" python3 "$SCRIPTS/diagnose.py" --json --no-preflight > diag.json 2>/dev/null || true
+python3 - <<'PY' && ok_msg "mcp parity converges with control characters" || fail_msg "mcp parity never converges on a control character"
+import json
+checks = {c["id"]: c for c in json.load(open("diag.json"))["checks"]}
+assert checks["mcp_parity"]["status"] == "healthy", checks["mcp_parity"]
+PY
+cleanup
+
+# ══════════ T54d  codex-preflight.sh — a failed refresh is not retried per call
+# The refresh is a real, billable model roundtrip, and the preflight runs from
+# hooks and from every model-selecting command. Without a cooldown a machine
+# with a broken cache spends one call per invocation to fail identically.
+section "T54d: codex-preflight.sh — failed cache refresh is rate limited"
+make_tmp
+
+mkdir -p bin home/.codex cache
+CALLLOG="$PWD/codex-exec-calls.txt"; : > "$CALLLOG"
+cat > bin/codex <<'CODEX'
+#!/usr/bin/env bash
+case "$1" in
+  "--version") echo "codex-cli 0.147.0" ;;
+  "login") echo "Logged in with ChatGPT" ;;
+  "exec") echo "CALLED" >> "$CALLLOG"; echo "stream error: quota exceeded" >&2; exit 1 ;;
+  *) exit 1 ;;
+esac
+CODEX
+chmod +x bin/codex
+
+PYTHON_BIN_DIR="$(dirname "$(command -v python3)")"
+for _ in 1 2 3; do
+  env HOME="$PWD/home" XDG_CACHE_HOME="$PWD/cache" CODEX_PREFLIGHT_NO_CACHE=1 CALLLOG="$CALLLOG" \
+    PATH="$PWD/bin:$PYTHON_BIN_DIR:/usr/bin:/bin" \
+    bash "$SCRIPTS/codex-preflight.sh" >/dev/null 2>&1 || true
+done
+calls="$(wc -l < "$CALLLOG" | tr -d ' ')"
+if [ "$calls" = "1" ]; then ok_msg "three preflight runs made exactly one billable codex exec call"
+else fail_msg "expected 1 billable codex exec call across three runs, got $calls"; fi
+
+cleanup
+
+# ══════════ T54c  unbridge.sh — sentinel stripping never corrupts config.toml ═
+# Marker spans are resolved against the original text and removed right to left.
+# Computing them per iteration against already-mutated text let one block's
+# removal swallow an interleaved block's opening marker, after which the slice
+# silently duplicated the file's tail and the script still exited 0.
+section "T54c: unbridge.sh — interleaved/nested sentinels fail closed, separate ones strip cleanly"
+
+toml_is_valid() {
+  python3 -c "import tomllib,sys; tomllib.load(open(sys.argv[1],'rb'))" "$1" 2>/dev/null
+}
+
+# (a) interleaved markers — must refuse and leave the file valid and intact
+make_tmp
+mkdir -p .codex
+cat > .codex/config.toml <<'TOML'
+[settings]
+a = 1
+# >>> cc-suite-mcp >>>
+x = 1
+# >>> cc-suite-claude-mcp >>>
+y = 2
+# <<< cc-suite-mcp <<<
+[other]
+b = 2
+# <<< cc-suite-claude-mcp <<<
+[tail]
+z = 1
+TOML
+cp .codex/config.toml expected.toml
+assert_exit_nonzero bash "$SCRIPTS/unbridge.sh"
+if toml_is_valid .codex/config.toml; then ok_msg "interleaved: config.toml still parses as TOML"
+else fail_msg "interleaved: config.toml was corrupted"; fi
+if cmp -s .codex/config.toml expected.toml; then ok_msg "interleaved: config.toml left byte-identical"
+else fail_msg "interleaved: config.toml was rewritten"; fi
+cleanup
+
+# (b) nested markers — same refusal, and the final byte is not dropped
+make_tmp
+mkdir -p .codex
+printf '[settings]
+a = 1
+# >>> cc-suite-mcp >>>
+x = 1
+# >>> cc-suite-claude-mcp >>>
+y = 2
+# <<< cc-suite-claude-mcp <<<
+# <<< cc-suite-mcp <<<
+[tail]
+zzz = "LASTCHAR"' > .codex/config.toml
+cp .codex/config.toml expected.toml
+assert_exit_nonzero bash "$SCRIPTS/unbridge.sh"
+if toml_is_valid .codex/config.toml; then ok_msg "nested: config.toml still parses as TOML"
+else fail_msg "nested: config.toml was corrupted"; fi
+if cmp -s .codex/config.toml expected.toml; then ok_msg "nested: config.toml left byte-identical"
+else fail_msg "nested: final byte dropped or file rewritten"; fi
+cleanup
+
+# (c) two separate blocks — the supported shape still strips cleanly
+make_tmp
+mkdir -p .codex
+cat > .codex/config.toml <<'TOML'
+[settings]
+a = 1
+# >>> cc-suite-mcp >>>
+x = 1
+# <<< cc-suite-mcp <<<
+[middle]
+m = 1
+# >>> cc-suite-claude-mcp >>>
+y = 2
+# <<< cc-suite-claude-mcp <<<
+[tail]
+z = 1
+TOML
+assert_exit0 bash "$SCRIPTS/unbridge.sh"
+if toml_is_valid .codex/config.toml; then ok_msg "separate: config.toml still parses as TOML"
+else fail_msg "separate: config.toml was corrupted"; fi
+assert_not_contains ".codex/config.toml" "cc-suite-mcp"
+assert_not_contains ".codex/config.toml" "cc-suite-claude-mcp"
+assert_contains ".codex/config.toml" "[middle]"
+assert_contains ".codex/config.toml" "[tail]"
 cleanup
 
 # ══════════ T55  bridge_mcp.sh — Codex + Antigravity projections ═════════════
@@ -1756,7 +2156,7 @@ echo '{ "mcpServers": {} }' > .mcp.json
 printf '## Enabled Tools\n- [x] grok\n- [x] opencode\n' > .cc-suite.md
 assert_exit0 python3 "$SCRIPTS/bridge_tools.py"
 printf '\nmodel = "grok-build"\n' >> .grok/config.toml               # user setting outside the block
-assert_exit0 python3 "$SCRIPTS/bridge_tools.py" --unbridge
+assert_exit0 python3 "$SCRIPTS/bridge_tools.py" --unbridge grok,opencode
 assert_contains     ".grok/config.toml" "grok-build"                # user line kept
 assert_not_contains ".grok/config.toml" "cc-suite-mcp"              # cc-suite block removed
 assert_no_file      "opencode.json"                                 # was cc-suite-only → removed
@@ -1826,6 +2226,350 @@ rm .cc-suite.md
 assert_exit0   python3 "$SCRIPTS/migrate_config.py"   # no config → no-op, exit 0
 assert_no_file ".cc-suite.md"                         # must NOT create the file itself
 
+cleanup
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# T71  bridge_tools.py --detect / --set-enabled — the init tool picker
+# ═══════════════════════════════════════════════════════════════════════════════
+section "T71: bridge_tools.py — detect and set enabled tools"
+make_tmp
+
+assert_exit0 python3 "$SCRIPTS/bridge_tools.py" --detect
+python3 "$SCRIPTS/bridge_tools.py" --detect > detect.json 2>/dev/null
+assert_contains "detect.json" '"id": "claude"'
+assert_contains "detect.json" '"installed"'
+assert_contains "detect.json" '"china_tier"'
+# Claude is the host: always reported present even without a binary on PATH.
+assert_exit0 python3 -c "
+import json
+d = {t['id']: t for t in json.load(open('detect.json'))}
+assert d['claude']['installed'] is True, 'claude must always be installed'
+assert set(d) == {'claude','codex','antigravity','grok','opencode','qwen','kimi'}, d.keys()
+"
+
+printf '# cc-suite\n\nSettings.\n' > .cc-suite.md
+python3 "$SCRIPTS/migrate_config.py" >/dev/null 2>&1
+assert_exit0 python3 "$SCRIPTS/bridge_tools.py" --set-enabled codex,opencode
+assert_contains     ".cc-suite.md" "- [x] codex"
+assert_contains     ".cc-suite.md" "- [x] opencode"
+assert_contains     ".cc-suite.md" "- [x] claude"     # always forced on
+assert_not_contains ".cc-suite.md" "- [x] antigravity"
+assert_not_contains ".cc-suite.md" "- [x] qwen"
+
+cleanup
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# T72  init.sh — honours the enabled-tools selection
+# ═══════════════════════════════════════════════════════════════════════════════
+section "T72: init.sh — skips Codex scaffolding when codex is not enabled"
+make_tmp
+
+# Claude-only project: no .codex/ artifacts should be created at all.
+printf '# cc-suite\n\nSettings.\n' > .cc-suite.md
+python3 "$SCRIPTS/migrate_config.py" >/dev/null 2>&1
+python3 "$SCRIPTS/bridge_tools.py" --set-enabled claude >/dev/null 2>&1
+bash "$SCRIPTS/init.sh" --description "Claude Only" >/dev/null 2>&1
+
+assert_file    "AGENTS.md"
+assert_no_file ".codex/config.toml"
+assert_no_dir  ".codex/prompts"
+
+# A project that bridges no Codex gets no .codex/ at all. cc-suite's own
+# bookkeeping lives in .cc-suite/, so nothing needs the Codex directory.
+assert_no_dir ".codex"
+assert_file   ".cc-suite/provenance"
+assert_contains ".cc-suite/provenance" "CC_SUITE_CREATED_CLAUDE=1"
+
+cleanup
+
+section "T72b: init.sh — still bridges Codex when enabled (and by default)"
+make_tmp
+
+printf '# cc-suite\n\nSettings.\n' > .cc-suite.md
+python3 "$SCRIPTS/migrate_config.py" >/dev/null 2>&1
+python3 "$SCRIPTS/bridge_tools.py" --set-enabled codex >/dev/null 2>&1
+bash "$SCRIPTS/init.sh" --description "With Codex" >/dev/null 2>&1
+
+assert_file ".codex/config.toml"
+assert_file ".codex/prompts/.gitkeep"
+
+cleanup
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# T73  bridge_mcp.sh — honours the enabled-tools selection
+# ═══════════════════════════════════════════════════════════════════════════════
+section "T73: bridge_mcp.sh — codex disabled → no .codex/ created"
+make_tmp
+printf '## Enabled Tools\n- [x] claude\n- [x] antigravity\n' > .cc-suite.md
+echo '{ "mcpServers": { "my-server": { "type": "stdio", "command": "x" } } }' > .mcp.json
+assert_exit0 bash "$SCRIPTS/bridge_mcp.sh"
+assert_no_dir ".codex"
+assert_file   ".agents/mcp_config.json"          # antigravity still projected
+cleanup
+
+section "T73b: bridge_mcp.sh — codex disabled reconciles an existing config"
+make_tmp
+printf '## Enabled Tools\n- [x] claude\n' > .cc-suite.md
+echo '{ "mcpServers": { "my-server": { "type": "stdio", "command": "x" } } }' > .mcp.json
+mkdir -p .codex
+cat > .codex/config.toml <<'TOML'
+# user setting
+model = "gpt-5.6-sol"
+# >>> cc-suite-mcp >>>
+[mcp_servers.my-server]
+command = "x"
+# <<< cc-suite-mcp <<<
+TOML
+assert_exit0 bash "$SCRIPTS/bridge_mcp.sh"
+assert_contains     ".codex/config.toml" "# user setting"          # user TOML preserved
+assert_not_contains ".codex/config.toml" "[mcp_servers.my-server]" # cc-suite block removed
+assert_no_dir ".agents"                                            # antigravity disabled too
+cleanup
+
+section "T73c: bridge_mcp.sh — antigravity disabled → no .agents/ created, codex still projected"
+make_tmp
+printf '## Enabled Tools\n- [x] claude\n- [x] codex\n' > .cc-suite.md
+echo '{ "mcpServers": { "my-server": { "type": "stdio", "command": "x" } } }' > .mcp.json
+assert_exit0 bash "$SCRIPTS/bridge_mcp.sh"
+assert_contains ".codex/config.toml" "[mcp_servers.my-server]"
+assert_no_dir   ".agents"
+cleanup
+
+section "T73d: bridge_mcp.sh — no .cc-suite.md keeps legacy behavior (both projected)"
+make_tmp
+echo '{ "mcpServers": { "my-server": { "type": "stdio", "command": "x" } } }' > .mcp.json
+assert_exit0 bash "$SCRIPTS/bridge_mcp.sh"
+assert_contains ".codex/config.toml" "[mcp_servers.my-server]"
+assert_file     ".agents/mcp_config.json"
+cleanup
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# T74  bridge_agents.py — honours the enabled-tools selection
+# ═══════════════════════════════════════════════════════════════════════════════
+section "T74: bridge_agents.py — codex disabled → advisor registered in .mcp.json only"
+make_tmp
+printf '## Enabled Tools\n- [x] claude\n' > .cc-suite.md
+mkdir -p .cc-suite/agents
+cat > .cc-suite/agents/tester.md <<'MD'
+---
+description: Test advisor.
+---
+Be a test advisor.
+MD
+assert_exit0 python3 "$SCRIPTS/bridge_agents.py"
+assert_contains '.mcp.json' '"tester"'
+assert_no_dir   ".codex"
+cleanup
+
+section "T74b: bridge_agents.py — codex disabled clears advisor blocks in an existing config"
+make_tmp
+printf '## Enabled Tools\n- [x] claude\n' > .cc-suite.md
+mkdir -p .cc-suite/agents .codex
+cat > .cc-suite/agents/tester.md <<'MD'
+---
+description: Test advisor.
+---
+Be a test advisor.
+MD
+cat > .codex/config.toml <<'TOML'
+# user setting
+# >>> cc-suite-agent: stale_advisor >>>
+[mcp_servers.stale_advisor]
+command = "npx"
+# <<< cc-suite-agent: stale_advisor <<<
+TOML
+assert_exit0 python3 "$SCRIPTS/bridge_agents.py"
+assert_contains     ".codex/config.toml" "# user setting"
+assert_not_contains ".codex/config.toml" "stale_advisor"
+assert_not_contains ".codex/config.toml" "tester"        # disabled → no new advisor projected
+assert_contains     ".mcp.json" '"tester"'
+cleanup
+
+section "T74c: bridge_agents.py — codex enabled keeps projecting advisors"
+make_tmp
+printf '## Enabled Tools\n- [x] claude\n- [x] codex\n' > .cc-suite.md
+mkdir -p .cc-suite/agents
+cat > .cc-suite/agents/tester.md <<'MD'
+---
+description: Test advisor.
+---
+Be a test advisor.
+MD
+assert_exit0 python3 "$SCRIPTS/bridge_agents.py"
+assert_contains ".mcp.json" '"tester"'
+assert_contains ".codex/config.toml" "cc-suite-agent: tester"
+cleanup
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# T76  diagnose.py — structured diagnostic engine
+# ═══════════════════════════════════════════════════════════════════════════════
+section "T76: diagnose.py — empty project reports issues as JSON"
+make_tmp
+if mkdir -p "$TMP/fakehome"; HOME="$TMP/fakehome" python3 "$SCRIPTS/diagnose.py" --json --no-preflight > diag.json 2>/dev/null; then
+  fail_msg "diagnose.py should exit non-zero on an unbridged project"
+else
+  ok_msg "diagnose.py exits non-zero on an unbridged project"
+fi
+python3 - <<'PY' && ok_msg "empty project: agents_md + skills links are issues with auto fixes" || fail_msg "empty-project JSON assertions failed"
+import json
+d = json.load(open("diag.json"))
+checks = {c["id"]: c for c in d["checks"]}
+assert d["summary"]["issue"] > 0
+assert checks["agents_md"]["status"] == "issue"
+assert checks["agents_md"]["fix"]["auto"], "agents_md must carry an auto fix"
+assert checks["claude_skills_link"]["status"] == "issue"
+PY
+cleanup
+
+section "T76b: diagnose.py — disabled tools classify as expected_absent, not issues"
+make_tmp
+printf '## Enabled Tools\n- [x] claude\n' > .cc-suite.md
+mkdir -p "$TMP/fakehome"; HOME="$TMP/fakehome" python3 "$SCRIPTS/diagnose.py" --json --no-preflight > diag.json 2>/dev/null || true
+python3 - <<'PY' && ok_msg "codex/agy checks are expected_absent when disabled" || fail_msg "disabled-tools classification failed"
+import json
+d = json.load(open("diag.json"))
+checks = {c["id"]: c for c in d["checks"]}
+for cid in ("codex_artifacts", "mcp_codex_cli", "claude_code_reg", "mcp_parity", "agy_mcp", "codex_runtime", "agents_skills_link"):
+    assert checks[cid]["status"] == "expected_absent", f"{cid}: {checks[cid]['status']}"
+PY
+cleanup
+
+section "T76c: diagnose.py — initialized project is healthy on the hermetic checks"
+make_tmp
+printf '# X\n' > AGENTS.md
+bash "$SCRIPTS/init.sh"          >/dev/null 2>&1
+bash "$SCRIPTS/bridge_skills.sh" >/dev/null 2>&1
+bash "$SCRIPTS/mcp_codex.sh"     >/dev/null 2>&1
+bash "$SCRIPTS/mcp_claude.sh"    >/dev/null 2>&1
+bash "$SCRIPTS/bridge_mcp.sh"    >/dev/null 2>&1
+printf '## Enabled Tools\n- [x] claude\n- [x] codex\n- [x] antigravity\n\n## Defaults\n\n- **Default model**: latest\n' > .cc-suite.md
+mkdir -p "$TMP/fakehome"; HOME="$TMP/fakehome" python3 "$SCRIPTS/diagnose.py" --json --no-preflight > diag.json 2>/dev/null || true
+python3 - <<'PY' && ok_msg "initialized project: bridge checks healthy, latest policy healthy" || fail_msg "initialized-project assertions failed"
+import json
+d = json.load(open("diag.json"))
+checks = {c["id"]: c for c in d["checks"]}
+for cid in ("agents_md", "claude_md", "claude_skills_link", "agents_skills_link",
+            "codex_config", "mcp_codex_cli", "claude_code_reg", "agy_mcp", "gitignore", "model_pin"):
+    assert checks[cid]["status"] == "healthy", f"{cid}: {checks[cid]['status']} — {checks[cid]['detail']}"
+assert d["summary"].get("issue", 0) == 0, d["summary"]
+PY
+cleanup
+
+section "T76d: diagnose.py — malformed model field is informational, stale advisor parity is an issue"
+make_tmp
+printf '## Defaults\n\n- **Default model**: latest\n- **Default model**: gpt-old\n' > .cc-suite.md
+mkdir -p .cc-suite/agents
+printf -- '---\ndescription: t.\n---\nx\n' > .cc-suite/agents/ghost.md
+mkdir -p "$TMP/fakehome"; HOME="$TMP/fakehome" python3 "$SCRIPTS/diagnose.py" --json --no-preflight > diag.json 2>/dev/null || true
+python3 - <<'PY' && ok_msg "duplicate model field → info; unregistered advisor → issue" || fail_msg "T76d assertions failed"
+import json
+d = json.load(open("diag.json"))
+checks = {c["id"]: c for c in d["checks"]}
+assert checks["model_pin"]["status"] == "info", checks["model_pin"]
+assert checks["advisors"]["status"] == "issue", checks["advisors"]
+PY
+cleanup
+
+section "T76e: diagnose.py — unbridged enabled registry tool surfaces via --health"
+make_tmp
+printf '## Enabled Tools\n- [x] claude\n- [x] grok\n' > .cc-suite.md
+mkdir -p "$TMP/fakehome"; HOME="$TMP/fakehome" python3 "$SCRIPTS/diagnose.py" --json --no-preflight > diag.json 2>/dev/null || true
+python3 - <<'PY' && ok_msg "grok enabled but unbridged → tool_grok issue with bridge-tools fix" || fail_msg "T76e assertions failed"
+import json
+d = json.load(open("diag.json"))
+checks = {c["id"]: c for c in d["checks"]}
+assert checks["tool_grok"]["status"] == "issue", checks.get("tool_grok")
+assert any("bridge_tools" in cmd for cmd in checks["tool_grok"]["fix"]["auto"])
+PY
+cleanup
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# T77  fix_plugin_hooks.py — section-scoped idempotent TOML edit
+# ═══════════════════════════════════════════════════════════════════════════════
+section "T77: fix_plugin_hooks.py — replaces, inserts once, leaves other tables alone"
+make_tmp
+printf '[features]\nplugin_hooks = false\n[other]\nplugin_hooks = false\n' > cfg.toml
+export FIX="$SCRIPTS/fix_plugin_hooks.py"
+assert_exit0 python3 "$SCRIPTS/fix_plugin_hooks.py" cfg.toml
+python3 - <<'PY' && ok_msg "replaced in [features], [other] untouched, idempotent" || fail_msg "fix_plugin_hooks assertions failed"
+import subprocess, sys, tomllib
+d = tomllib.load(open("cfg.toml", "rb"))
+assert d["features"]["plugin_hooks"] is True and d["other"]["plugin_hooks"] is False
+subprocess.run([sys.executable, __import__("os").environ["FIX"], "cfg.toml"], check=True, capture_output=True)
+text = open("cfg.toml").read()
+assert text.count("plugin_hooks") == 2  # one per table, no duplicates added
+PY
+cleanup
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# T75  status.sh — advisor block with the current pin must not mask a stale claude-code pin
+# ═══════════════════════════════════════════════════════════════════════════════
+section "T75: status.sh — stale claude-code pin flagged despite current-pin advisor block"
+make_tmp
+_current_pin="$(tr -d '[:space:]' < "$SCRIPTS/lib/claude-octopus-pin.txt")"
+mkdir -p .codex
+cat > .codex/config.toml <<TOML
+# >>> cc-suite-claude-mcp >>>
+[mcp_servers.claude-code]
+command = "npx"
+args = ["-y", "claude-octopus@0.0.1"]
+# <<< cc-suite-claude-mcp <<<
+
+# >>> cc-suite-agent: advisor >>>
+[mcp_servers.advisor]
+command = "npx"
+args = ["-y", "claude-octopus@${_current_pin}"]
+# <<< cc-suite-agent: advisor <<<
+TOML
+_mask_out="$(bash "$SCRIPTS/status.sh" 2>&1)"
+if printf '%s' "$_mask_out" | grep -q 'claude-code pinned @claude-octopus@0.0.1\|but plugin expects'; then
+  ok_msg "status.sh: stale claude-code pin flagged (advisor block did not mask it)"
+else
+  fail_msg "status.sh: stale claude-code pin masked by advisor block"
+fi
+cleanup
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# T78  qwen-runner.mjs — no prompt → exits non-zero
+# ═══════════════════════════════════════════════════════════════════════════════
+section "T78: qwen-runner.mjs — missing prompt is rejected"
+make_tmp
+assert_exit_nonzero node "$SCRIPTS/qwen-runner.mjs" --kind qwen-review
+cleanup
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# T79  qwen-runner.mjs — qwen absent → failed job with install hint
+# ═══════════════════════════════════════════════════════════════════════════════
+section "T79: qwen-runner.mjs — qwen not on PATH"
+make_tmp
+mkdir -p node-bin
+ln -s "$(command -v node)" node-bin/node
+STERILE_PATH="$PWD/node-bin:/usr/bin:/bin"
+
+out="$(env PATH="$STERILE_PATH" CLAUDE_PLUGIN_DATA="$PWD/plugin-data" \
+  node "$SCRIPTS/qwen-runner.mjs" --kind qwen-review \
+  --max-resumes 0 --attempt-timeout-ms 1000 --idle-timeout-ms 1000 \
+  --timeout-ms 2000 -- "smoke" 2>/dev/null || true)"
+printf '%s' "$out" > result.json
+
+assert_exit0 python3 -c "import json; json.load(open('result.json'))"
+assert_contains "result.json" '"status":"failed"'
+assert_contains "result.json" '"errorCode":"qwen_not_found"'
+assert_contains "result.json" '"jobId"'
+cleanup
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# T80  qwen-preflight.sh — qwen absent → error JSON
+# ═══════════════════════════════════════════════════════════════════════════════
+section "T80: qwen-preflight.sh — qwen not on PATH"
+make_tmp
+STERILE_PATH="$(dirname "$(command -v python3)"):/usr/bin:/bin"
+out="$(env PATH="$STERILE_PATH" bash "$SCRIPTS/qwen-preflight.sh" 2>/dev/null || true)"
+printf '%s' "$out" > pf.json
+
+assert_exit0 python3 -c "import json; json.load(open('pf.json'))"
+assert_contains "pf.json" '"status":"error"'
+assert_contains "pf.json" '"error_code":"qwen_not_found"'
 cleanup
 
 # ═══════════════════════════════════════════════════════════════════════════════

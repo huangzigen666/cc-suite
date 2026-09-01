@@ -1,5 +1,4 @@
 ---
-name: status
 description: Show active and recent Codex or Antigravity jobs — background tasks, running audits, completed results
 argument-hint: "[job-id] [--all] [--json]"
 ---
@@ -34,6 +33,7 @@ Parse `$ARGUMENTS`:
 |-------|--------|
 | (empty) | Show all jobs for current session |
 | `<job-id>` | Show details for a specific job |
+| `<job-id>` matching no recorded job | Report `Job {job-id} not found. Run /cc-suite:status with no arguments to list known jobs.` and STOP |
 | `--all` | Show all jobs across all sessions |
 | `--json` | Output raw JSON instead of markdown |
 

@@ -41,9 +41,14 @@ sentinel), the script refuses to overwrite it and reports the conflict.
 import json
 import os
 import re
+import subprocess
 import sys
+import tempfile
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
+
+sys.path.insert(0, str(Path(__file__).resolve().parent / "lib"))
+from pin import PinError, read_pin as read_validated_pin  # noqa: E402
 
 # ── locations ────────────────────────────────────────────────────────────────
 AGENT_DIR = Path(".cc-suite/agents")
@@ -62,6 +67,36 @@ DEFAULT_MAX_TURNS = 5
 DEFAULT_PROMPT_MODE = "append"
 DEFAULT_MODEL = None  # let claude-octopus pick
 
+# ── schema ───────────────────────────────────────────────────────────────────
+KNOWN_KEYS = {
+    "name", "description", "model", "tool_name", "allowed_tools",
+    "disallowed_tools", "permission_mode", "max_turns", "max_budget_usd",
+    "effort", "cwd", "additional_dirs", "prompt_mode",
+}
+# Server names cc-suite registers itself. An advisor claiming one of these would
+# be projected over the reverse-delegation registration Codex and agy depend on.
+RESERVED_NAMES = {"claude-code", "codex-cli"}
+
+
+def enabled_tools() -> set:
+    """Enabled coding agents from .cc-suite.md, via bridge_tools.py --enabled.
+
+    Falls back to the pre-selection default (claude/codex/antigravity) when the
+    config, section, or helper is unavailable, matching init.sh's behavior.
+    """
+    script = Path(__file__).parent / "bridge_tools.py"
+    try:
+        out = subprocess.run(
+            [sys.executable, str(script), "--enabled"],
+            capture_output=True, text=True, timeout=10,
+        )
+        tools = {line.strip() for line in out.stdout.splitlines() if line.strip()}
+        if tools:
+            return tools
+    except Exception:
+        pass
+    return {"claude", "codex", "antigravity"}
+
 
 def read_pin() -> str:
     """Read the pinned claude-octopus version from the shared pin file."""
@@ -71,11 +106,14 @@ def read_pin() -> str:
         candidates.append(Path(plugin_root) / "scripts/lib/claude-octopus-pin.txt")
     # Also try the path relative to this script's location.
     candidates.append(Path(__file__).parent / "lib/claude-octopus-pin.txt")
-    for p in candidates:
-        if p.is_file():
-            return p.read_text().strip()
-    print("! claude-octopus-pin.txt not found — using fallback 'latest'", file=sys.stderr)
-    return "latest"
+    try:
+        return read_validated_pin(*candidates)
+    except PinError as exc:
+        print(
+            f"! {exc} — refusing to register advisors against an unpinned claude-octopus",
+            file=sys.stderr,
+        )
+        raise SystemExit(2)
 
 
 # ── frontmatter parser ───────────────────────────────────────────────────────
@@ -134,6 +172,86 @@ def _split_csv(s: str) -> List[str]:
     return [x for x in out if x]
 
 
+def _validate_str_list(agent: Dict[str, Any], key: str) -> None:
+    """Require a list of non-empty, comma-free strings.
+
+    The comma rule is load-bearing: these lists are emitted as comma-joined
+    env values, so an entry containing a comma would silently become two.
+    """
+    value = agent[key]
+    if not isinstance(value, list):
+        raise ValueError(f"{key} must be a list, got {value!r}")
+    for item in value:
+        if not isinstance(item, str) or not item.strip():
+            raise ValueError(f"{key} entries must be non-empty strings, got {item!r}")
+        if "," in item:
+            raise ValueError(f"{key} entry {item!r} contains a comma — use one list entry per value")
+
+
+def _validate_agent(agent: Dict[str, Any]) -> None:
+    """Validate the documented agent schema beyond the name check.
+
+    `model` is deliberately not enum-checked: claude-octopus accepts full model
+    ids as well as the opus/sonnet/haiku aliases the header documents. It must
+    still be a non-empty string — an empty or non-string value would be
+    silently stringified into a broken CLAUDE_MODEL registration.
+    """
+    unknown = sorted(k for k in agent if not k.startswith("_") and k not in KNOWN_KEYS)
+    if unknown:
+        raise ValueError(
+            f"unknown frontmatter key(s) {unknown} — supported keys: {sorted(KNOWN_KEYS)}"
+        )
+    if "description" in agent and not (
+        isinstance(agent["description"], str) and agent["description"].strip()
+    ):
+        raise ValueError(f"description must be a non-empty string, got {agent['description']!r}")
+    if "model" in agent and not (isinstance(agent["model"], str) and agent["model"].strip()):
+        raise ValueError(f"model must be a non-empty string, got {agent['model']!r}")
+    if "prompt_mode" in agent and str(agent["prompt_mode"]).lower() not in ("append", "replace"):
+        raise ValueError(f"prompt_mode must be 'append' or 'replace', got {agent['prompt_mode']!r}")
+    if "permission_mode" in agent and str(agent["permission_mode"]) not in (
+        "default", "acceptEdits", "plan", "dontAsk", "auto", "bypassPermissions",
+    ):
+        raise ValueError(f"invalid permission_mode {agent['permission_mode']!r}")
+    if "effort" in agent and str(agent["effort"]) not in ("low", "medium", "high", "max"):
+        raise ValueError(f"effort must be low | medium | high | max, got {agent['effort']!r}")
+    if "tool_name" in agent and not re.match(r"^[A-Za-z][A-Za-z0-9_-]*$", str(agent["tool_name"])):
+        raise ValueError(f"invalid tool_name {agent['tool_name']!r}")
+    if "max_turns" in agent and not (
+        isinstance(agent["max_turns"], int)
+        and not isinstance(agent["max_turns"], bool)
+        and agent["max_turns"] > 0
+    ):
+        raise ValueError(f"max_turns must be a positive integer, got {agent['max_turns']!r}")
+    if "max_budget_usd" in agent and not (
+        isinstance(agent["max_budget_usd"], (int, float))
+        and not isinstance(agent["max_budget_usd"], bool)
+        and agent["max_budget_usd"] > 0
+    ):
+        raise ValueError(f"max_budget_usd must be a positive number, got {agent['max_budget_usd']!r}")
+    if agent.get("allowed_tools") == []:
+        raise ValueError(
+            "allowed_tools is an explicit empty list — claude-octopus would fall back to its "
+            "own defaults; use disallowed_tools to block tools instead"
+        )
+    # An unrecognized shape here is never inert: agent_to_env would drop the
+    # restriction and claude-octopus would fall back to its own broader defaults.
+    if "allowed_tools" in agent:
+        if isinstance(agent["allowed_tools"], str):
+            if not agent["allowed_tools"].strip():
+                raise ValueError("allowed_tools must not be empty")
+        else:
+            _validate_str_list(agent, "allowed_tools")
+    if "disallowed_tools" in agent:
+        _validate_str_list(agent, "disallowed_tools")
+    if "additional_dirs" in agent:
+        _validate_str_list(agent, "additional_dirs")
+    if "cwd" in agent and not (isinstance(agent["cwd"], str) and agent["cwd"].strip()):
+        raise ValueError(f"cwd must be a non-empty string, got {agent['cwd']!r}")
+    if not str(agent.get("_body") or "").strip():
+        raise ValueError("empty body — agent file must contain a system prompt")
+
+
 def parse_agent_file(path: Path) -> Dict[str, Any]:
     """Parse one agent file into a dict with keys + '_body' for the system prompt.
 
@@ -176,8 +294,15 @@ def parse_agent_file(path: Path) -> Dict[str, Any]:
                 indent = len(cont) - len(cont.lstrip())
                 if indent <= base_indent:
                     break
-                collected.append(cont[base_indent + 2:] if len(cont) > base_indent + 2 else cont.lstrip())
+                collected.append(cont)
                 i += 1
+            # Strip the block's actual indentation — the minimum across its
+            # non-blank lines — not a hardcoded two spaces; YAML allows any
+            # amount greater than the key's column.
+            non_blank = [ln for ln in collected if ln.strip()]
+            if non_blank:
+                strip_n = min(len(ln) - len(ln.lstrip()) for ln in non_blank)
+                collected = [ln[strip_n:] if ln.strip() else "" for ln in collected]
             if mode == "|":
                 # Literal: preserve newlines exactly.
                 value = "\n".join(collected).rstrip("\n")
@@ -208,6 +333,12 @@ def parse_agent_file(path: Path) -> Dict[str, Any]:
     # Validate name — must be a valid MCP server key (alphanumeric, dash, underscore).
     if not re.match(r"^[A-Za-z][A-Za-z0-9_-]*$", str(agent["name"])):
         raise ValueError(f"{path}: invalid agent name {agent['name']!r}")
+    if str(agent["name"]).lower() in RESERVED_NAMES:
+        raise ValueError(
+            f"{path}: agent name {agent['name']!r} is reserved for cc-suite infrastructure "
+            f"({sorted(RESERVED_NAMES)}) — rename the advisor"
+        )
+    _validate_agent(agent)
     return agent
 
 
@@ -271,13 +402,30 @@ def agent_to_env(agent: Dict[str, Any]) -> Dict[str, str]:
 
 
 # ── TOML scalar emitter (small, just enough for env values) ──────────────────
+_TOML_ESCAPES = {
+    "\\": "\\\\", '"': '\\"', "\b": "\\b", "\t": "\\t",
+    "\n": "\\n", "\f": "\\f", "\r": "\\r",
+}
+
+
 def _toml_str(v: str) -> str:
-    """Emit a TOML basic-string literal for v. Multi-line strings use triple quotes."""
-    if "\n" in v:
-        # Use TOML's multi-line basic string (triple-quoted).
-        escaped = v.replace("\\", "\\\\").replace('"""', '"\\""')
-        return '"""\n' + escaped + '\n"""'
-    return '"' + v.replace("\\", "\\\\").replace('"', '\\"') + '"'
+    """Emit a single-line TOML basic-string literal for v.
+
+    Always single-line, including for multi-line values: TOML's triple-quoted
+    form trims a newline directly after the opening delimiter and would need a
+    trailing one before the closing delimiter, so the parsed value would differ
+    from the same value in .mcp.json. Control characters other than the escapes
+    below are forbidden in basic strings and must be emitted as \\uXXXX.
+    """
+    out = []
+    for ch in v:
+        if ch in _TOML_ESCAPES:
+            out.append(_TOML_ESCAPES[ch])
+        elif ch < "\x20" or ch == "\x7f":
+            out.append(f"\\u{ord(ch):04X}")
+        else:
+            out.append(ch)
+    return '"' + "".join(out) + '"'
 
 
 def _toml_quote_key(name: str) -> str:
@@ -287,18 +435,47 @@ def _toml_quote_key(name: str) -> str:
     return '"' + name.replace('\\', '\\\\').replace('"', '\\"') + '"'
 
 
+# ── atomic commit ────────────────────────────────────────────────────────────
+def _atomic_write_text(path: Path, text: str) -> None:
+    """Write text through a same-directory temp file + os.replace, so a crash
+    or a concurrent reader never sees a partially written registry."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        mode = path.stat().st_mode & 0o777
+    except FileNotFoundError:
+        umask = os.umask(0)
+        os.umask(umask)
+        mode = 0o666 & ~umask
+    fd, tmp = tempfile.mkstemp(prefix=".tmp-", dir=str(path.parent))
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(text)
+        os.chmod(tmp, mode)
+        os.replace(tmp, path)
+    except Exception:
+        try:
+            os.unlink(tmp)
+        except FileNotFoundError:
+            pass
+        raise
+
+
 # ── .mcp.json update ─────────────────────────────────────────────────────────
-def update_mcp_json(agents: List[Dict[str, Any]], pin: str) -> List[str]:
-    """Rewrite cc-suite-managed advisor entries in .mcp.json. Returns conflicts."""
+def plan_mcp_json(agents: List[Dict[str, Any]], pin: str) -> Tuple[str, List[str]]:
+    """Render .mcp.json with cc-suite-managed advisor entries rewritten.
+
+    Returns the full file text and the conflicting names; writes nothing, so a
+    later validation failure cannot leave one registry ahead of the other.
+    """
     if MCP_FILE.exists():
         try:
             data = json.loads(MCP_FILE.read_text())
         except json.JSONDecodeError:
-            print(f"! {MCP_FILE} is not valid JSON — leaving alone", file=sys.stderr)
-            return []
+            print(f"! {MCP_FILE} is not valid JSON — leaving alone; fix it and re-run", file=sys.stderr)
+            raise SystemExit(2)
         if not isinstance(data, dict):
-            print(f"! {MCP_FILE} top level must be an object — leaving alone", file=sys.stderr)
-            return []
+            print(f"! {MCP_FILE} top level must be an object — leaving alone; fix it and re-run", file=sys.stderr)
+            raise SystemExit(2)
     else:
         data = {}
 
@@ -306,8 +483,8 @@ def update_mcp_json(agents: List[Dict[str, Any]], pin: str) -> List[str]:
     if servers is None:
         data["mcpServers"] = servers = {}
     elif not isinstance(servers, dict):
-        print(f"! {MCP_FILE} mcpServers must be an object — leaving alone", file=sys.stderr)
-        return []
+        print(f"! {MCP_FILE} mcpServers must be an object — leaving alone; fix it and re-run", file=sys.stderr)
+        raise SystemExit(2)
 
     # Drop existing cc-suite-managed advisor entries.
     for k in [k for k, v in servers.items() if isinstance(v, dict) and v.get(MARKER_KEY)]:
@@ -327,15 +504,46 @@ def update_mcp_json(agents: List[Dict[str, Any]], pin: str) -> List[str]:
             "env": agent_to_env(agent),
         }
 
-    MCP_FILE.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
-    return conflicts
+    return json.dumps(data, indent=2) + "\n", conflicts
 
 
 # ── .codex/config.toml update ────────────────────────────────────────────────
-def update_codex_toml(agents: List[Dict[str, Any]], pin: str) -> List[str]:
-    """Rewrite cc-suite-managed advisor blocks in .codex/config.toml. Returns conflicts."""
-    CODEX_FILE.parent.mkdir(parents=True, exist_ok=True)
+def plan_codex_toml(agents: List[Dict[str, Any]], pin: str) -> Tuple[str, List[str]]:
+    """Render .codex/config.toml with cc-suite-managed advisor blocks rewritten.
+
+    Returns the full file text and the conflicting names; writes nothing.
+    """
     text = CODEX_FILE.read_text(encoding="utf-8") if CODEX_FILE.exists() else ""
+
+    # Refuse to rewrite when sentinel blocks are unbalanced or mismatched: an
+    # unmatched opener would otherwise swallow everything to EOF on the
+    # rewrite, a stray closer signals a corrupted config we must not silently
+    # repair, and a closer naming a different agent than its opener means the
+    # block boundaries cannot be trusted.
+    depth = 0
+    open_name = None
+    mismatched = False
+    for line in text.splitlines():
+        s = line.rstrip()
+        if s.startswith(SENTINEL_OPEN) and s.endswith(">>>"):
+            depth += 1
+            if depth > 1:
+                break
+            open_name = s[len(SENTINEL_OPEN):-len(">>>")].strip()
+        elif s.startswith(SENTINEL_CLOSE) and s.endswith("<<<"):
+            depth -= 1
+            if depth < 0:
+                break
+            if s[len(SENTINEL_CLOSE):-len("<<<")].strip() != open_name:
+                mismatched = True
+                break
+    if depth != 0 or mismatched:
+        print(
+            f"! {CODEX_FILE}: unbalanced or mismatched cc-suite-agent sentinel block — "
+            "leaving alone; repair the sentinels manually and re-run",
+            file=sys.stderr,
+        )
+        raise SystemExit(2)
 
     # Strip every existing sentinel-bounded cc-suite-agent block AND one trailing
     # blank line immediately after each closed block — keeps the file from
@@ -409,8 +617,7 @@ def update_codex_toml(agents: List[Dict[str, Any]], pin: str) -> List[str]:
     else:
         final = (cleaned + "\n") if cleaned else ""
 
-    CODEX_FILE.write_text(final, encoding="utf-8")
-    return conflicts
+    return final, conflicts
 
 
 # ── timeline dirs + .gitignore ───────────────────────────────────────────────
@@ -446,10 +653,15 @@ def main() -> int:
         # just to write an empty mcpServers map.
         conflicts_mcp: List[str] = []
         conflicts_toml: List[str] = []
+        pending: List[Tuple[Path, str]] = []
         if MCP_FILE.exists():
-            conflicts_mcp = update_mcp_json([], read_pin())
+            mcp_text, conflicts_mcp = plan_mcp_json([], read_pin())
+            pending.append((MCP_FILE, mcp_text))
         if CODEX_FILE.exists():
-            conflicts_toml = update_codex_toml([], read_pin())
+            codex_text, conflicts_toml = plan_codex_toml([], read_pin())
+            pending.append((CODEX_FILE, codex_text))
+        for path, text in pending:
+            _atomic_write_text(path, text)
         if AGENT_DIR.exists():
             print(f"· no agents in {AGENT_DIR}/ — cleared any prior advisor registrations")
         else:
@@ -471,13 +683,32 @@ def main() -> int:
         print(f"! duplicate agent names: {dupes}", file=sys.stderr)
         return 1
 
-    conflicts_mcp = update_mcp_json(agents, pin)
-    conflicts_toml = update_codex_toml(agents, pin)
+    mcp_text, conflicts_mcp = plan_mcp_json(agents, pin)
+
+    # Project advisors into Codex only when Codex is an enabled tool. When it
+    # is disabled, clean up managed blocks in an existing config, but never
+    # create .codex/ for a deselected tool.
+    codex_enabled = "codex" in enabled_tools()
+    codex_text = None
+    if codex_enabled:
+        codex_text, conflicts_toml = plan_codex_toml(agents, pin)
+        codex_target = " + .codex/config.toml"
+    elif CODEX_FILE.exists():
+        codex_text, conflicts_toml = plan_codex_toml([], pin)
+        codex_target = " (codex not enabled — cleared its advisor blocks)"
+    else:
+        conflicts_toml = []
+        codex_target = " (codex not enabled — skipped)"
+
+    # Both projections are rendered and validated before either is committed.
+    _atomic_write_text(MCP_FILE, mcp_text)
+    if codex_text is not None:
+        _atomic_write_text(CODEX_FILE, codex_text)
     ensure_timeline_layout(agents)
 
     conflict_set = set(conflicts_mcp) | set(conflicts_toml)
     registered = [a for a in agents if a["name"] not in conflict_set]
-    print(f"✓ bridged {len(registered)}/{len(agents)} advisor(s) into .mcp.json + .codex/config.toml")
+    print(f"✓ bridged {len(registered)}/{len(agents)} advisor(s) into .mcp.json{codex_target}")
     for a in registered:
         name = str(a["name"])
         tool = str(a.get("tool_name") or f"{name}_consult")

@@ -1,9 +1,10 @@
 #!/usr/bin/env node
 
-import fs from "node:fs";
 import process from "node:process";
 import { spawnSync } from "node:child_process";
 
+import { readHookInput } from "./lib/hook-input.mjs";
+import { redactSecrets } from "./lib/redact.mjs";
 import { getConfig, listJobs } from "./lib/state.mjs";
 import { sortJobsNewestFirst, SESSION_ID_ENV } from "./lib/job-control.mjs";
 import { binaryAvailable } from "./lib/process.mjs";
@@ -13,11 +14,26 @@ const STOP_REVIEW_TIMEOUT_MS = 15 * 60 * 1000;
 // Use the user's configured Codex default unless an explicit override is
 // supplied. A plugin-wide model slug is not valid for every account.
 const STOP_REVIEW_MODEL = process.env.CC_SUITE_REVIEW_MODEL?.trim() || null;
+// The prompt is passed as a command-line argument, so its only unbounded input
+// — the previous assistant message — must stay far below ARG_MAX (256 KiB on
+// macOS): an E2BIG spawn failure would make this fail-closed gate unstoppable.
+const MAX_LAST_MESSAGE_CHARS = 8000;
+// Codex diagnostics are third-party text echoed into a hook decision the user
+// sees; cap them so one runaway stack trace cannot bloat the hook output.
+const MAX_DIAGNOSTIC_CHARS = 800;
 
-function readHookInput() {
-  const raw = fs.readFileSync(0, "utf8").trim();
-  if (!raw) return {};
-  return JSON.parse(raw);
+// Keep the tail: a failing `codex exec` puts its actual error at the end.
+function diagnosticTail(raw) {
+  const text = redactSecrets(String(raw ?? "").trim());
+  if (text.length <= MAX_DIAGNOSTIC_CHARS) return text;
+  return `…${text.slice(-MAX_DIAGNOSTIC_CHARS)}`;
+}
+
+// Keep the head: a review verdict leads with the reason that blocked.
+function reviewDetail(raw) {
+  const text = redactSecrets(String(raw ?? "").trim());
+  if (text.length <= MAX_DIAGNOSTIC_CHARS) return text;
+  return `${text.slice(0, MAX_DIAGNOSTIC_CHARS)}…`;
 }
 
 function emitDecision(payload) {
@@ -39,7 +55,8 @@ function buildReviewPrompt(input = {}) {
   const parts = [
     "You are an adversarial code reviewer.",
     "The code and changes you are reviewing were produced by Anthropic's Claude (a competing AI system). Evaluate them with full rigor — do not defer to them or assume correctness because an AI wrote them.",
-    "Review the changes Claude made in this session.",
+    "Review the pending changes in this worktree: use `git status` and `git diff HEAD`, plus untracked files, to enumerate exactly what is uncommitted.",
+    "Session-scoped attribution is not available, so some pending changes may predate this session — review everything pending and flag issues regardless of author.",
     "Focus on: correctness, security vulnerabilities, logic errors, missing edge cases, and regressions.",
     "",
     "Output format:",
@@ -51,7 +68,13 @@ function buildReviewPrompt(input = {}) {
   ];
 
   if (lastMessage) {
-    parts.push("", "Previous Claude response:", lastMessage);
+    const clipped =
+      lastMessage.length > MAX_LAST_MESSAGE_CHARS
+        ? `${lastMessage.slice(0, MAX_LAST_MESSAGE_CHARS)}\n[… truncated ${
+            lastMessage.length - MAX_LAST_MESSAGE_CHARS
+          } characters — review the worktree diff, which is authoritative …]`
+        : lastMessage;
+    parts.push("", "Previous Claude response:", clipped);
   }
 
   return parts.join("\n");
@@ -89,17 +112,17 @@ function runStopReview(cwd, input = {}) {
   if (result.error?.code === "ETIMEDOUT") {
     return {
       ok: false,
-      reason: "Stop-time review timed out after 15 minutes. Run /codex-toolkit:audit --wait manually.",
+      reason: "Stop-time review timed out after 15 minutes. Run /cc-suite:audit manually.",
     };
   }
 
   if (result.status !== 0) {
-    const detail = String(result.stderr || result.stdout || "").trim();
+    const detail = diagnosticTail(result.stderr || result.stdout || "");
     return {
       ok: false,
       reason: detail
         ? `Stop-time review failed: ${detail}`
-        : "Stop-time review failed. Run /codex-toolkit:audit manually.",
+        : "Stop-time review failed. Run /cc-suite:audit manually.",
     };
   }
 
@@ -111,7 +134,7 @@ function parseStopReviewOutput(rawOutput) {
   if (!text) {
     return {
       ok: false,
-      reason: "Stop-time review returned no output. Run /codex-toolkit:audit manually.",
+      reason: "Stop-time review returned no output. Run /cc-suite:audit manually.",
     };
   }
 
@@ -120,7 +143,7 @@ function parseStopReviewOutput(rawOutput) {
     return { ok: true, reason: null };
   }
   if (firstLine.startsWith("BLOCK:")) {
-    const reason = firstLine.slice("BLOCK:".length).trim() || text;
+    const reason = reviewDetail(firstLine.slice("BLOCK:".length).trim() || text);
     return {
       ok: false,
       reason: `Stop-time review found issues: ${reason}`,
@@ -129,7 +152,7 @@ function parseStopReviewOutput(rawOutput) {
 
   return {
     ok: false,
-    reason: "Stop-time review returned unexpected output. Run /codex-toolkit:audit manually.",
+    reason: "Stop-time review returned unexpected output. Run /cc-suite:audit manually.",
   };
 }
 
@@ -147,7 +170,7 @@ function main() {
     (j) => j.status === "queued" || j.status === "running"
   );
   const runningNote = runningJob
-    ? `Codex job ${runningJob.id} is still running. Use /codex-toolkit:cancel ${runningJob.id} to stop it.`
+    ? `Codex job ${runningJob.id} is still running. Use /cc-suite:cancel ${runningJob.id} to stop it.`
     : null;
 
   // If review gate is disabled, just log and exit
@@ -156,11 +179,15 @@ function main() {
     return;
   }
 
-  // Check codex availability
+  // Check codex availability. The gate is opt-in, so fail closed: a missing
+  // reviewer must block like any other review failure, not silently allow.
   const codexStatus = binaryAvailable("codex");
   if (!codexStatus.available) {
-    logNote("Codex CLI not available for stop-time review.");
-    logNote(runningNote);
+    const reason = `Stop-time review gate is enabled but the Codex CLI is unavailable (${codexStatus.detail}). Install the codex CLI, or disable the review gate, then retry.`;
+    emitDecision({
+      decision: "block",
+      reason: runningNote ? `${runningNote} ${reason}` : reason,
+    });
     return;
   }
 

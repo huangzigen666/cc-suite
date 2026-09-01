@@ -11,5 +11,11 @@ rule_overrides:
 
 # NLPM Settings
 
-When linting NL artifacts in this project, use **strict** strictness.
+When scoring NL artifacts in this project, use **strict** strictness.
 Flag artifacts scoring below **80/100** for improvement.
+
+> The former R01 meta-usage and R51 self-reference overrides were removed
+> after nlpm 1.1.3 absorbed both as the rubric's own mention-versus-use
+> exclusions (scoring skill, dated 2026-08-01) — the audit-family commands'
+> quoted term lists and the vocabulary skill's declaration tables are now
+> exempt by the rubric itself, not by project config.

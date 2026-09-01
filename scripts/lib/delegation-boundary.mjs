@@ -18,8 +18,9 @@
 //      stop an agent that reaches for the skill deliberately.
 //
 //   2. This boundary, injected into the prompt. Tool-agnostic and effective
-//      against deliberate use, so it is the only lever available on the agy and
-//      Grok lanes. Applied in code rather than left to the calling command,
+//      against deliberate use, so it is the only lever available on the agy,
+//      Grok, and bounded Qwen-review lanes. Applied in code rather than left to
+//      the calling command,
 //      because it has to hold on every call — foreground, background, resume.
 //
 // The Codex lane assembles its preamble from prose in
@@ -37,23 +38,30 @@ export const DELEGATING_SKILLS = Object.freeze([
   "claude-debug",
 ]);
 
+// Each invariant sentence is defined exactly once so the canonical copy in
+// BOUNDARY_INVARIANTS and the prompt copy in DELEGATION_BOUNDARY cannot drift.
+const INVARIANT_WORKER_NOT_ROUTER =
+  "You are the agent that does the work, not a router for it.";
+const INVARIANT_NO_RETURN_TO_AUTHOR =
+  "Returning this work to its author would destroy the independent judgment this call exists to provide.";
+
 // Sentences every lane's boundary must contain, whether it comes from this
 // module or from the Codex preamble prose. Enforced by
 // tests/delegation-guard.test.mjs.
 export const BOUNDARY_INVARIANTS = Object.freeze([
-  "You are the agent that does the work, not a router for it.",
-  "Returning this work to its author would destroy the independent judgment this call exists to provide.",
+  INVARIANT_WORKER_NOT_ROUTER,
+  INVARIANT_NO_RETURN_TO_AUTHOR,
 ]);
 
 // "activate or invoke" covers both vocabularies: Codex invokes a skill
 // explicitly, Antigravity activates one after reading its description.
 export const DELEGATION_BOUNDARY = [
   "This request already reached you by delegation from Claude Code.",
-  "You are the agent that does the work, not a router for it.",
+  INVARIANT_WORKER_NOT_ROUTER,
   "Perform the analysis yourself and return the result directly.",
   "Do not activate or invoke workspace skills that hand the task back to Claude Code —",
   `${DELEGATING_SKILLS.join(", ")} all delegate to Claude Code and must not be used here.`,
-  "Returning this work to its author would destroy the independent judgment this call exists to provide.",
+  INVARIANT_NO_RETURN_TO_AUTHOR,
 ].join(" ");
 
 /**

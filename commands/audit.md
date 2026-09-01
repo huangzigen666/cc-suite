@@ -1,5 +1,4 @@
 ---
-name: audit
 description: Code auditor — full 9-dimension or fast 5-dimension audit with --full/--mini flag
 argument-hint: "[scope] [--full | --mini] [--background | --wait]"
 ---
@@ -173,6 +172,8 @@ Report each issue as: file:line | severity(Critical/High/Medium/Low) | dimension
 ```
 
 ### Step 4: Report
+
+Before rendering the report, if the audit produced at least one finding, write the merged findings to `.cc-suite/audits/audit-{YYYYMMDD-HHMMSS}-findings.md` (create the directory if missing) using the findings-file format from `commands/audit-fix.md` Step 2b, with every row's Status set to `open`. Mention the path in the report header. If the write fails, display the findings inline, note that no findings file was persisted, and continue — the report itself is the primary output. A durable findings file survives context compaction in long sessions and lets a later fix pass start from the audit's exact output instead of re-auditing.
 
 #### Mini Report
 

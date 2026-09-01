@@ -1,5 +1,4 @@
 ---
-name: audit-nlp
 description: Repo-wide natural language programming auditor — discover and audit all NL artifacts (prompts, skills, agents, commands, rules, hooks, plugins, specs, plans) in any repository
 argument-hint: "[repo-path] [--full | --mini]"
 ---
@@ -41,6 +40,8 @@ Parse `$ARGUMENTS` for `--full` or `--mini` flags. Remove the flag from the rema
 ### Step 2: Discover ALL NL Artifacts
 
 Scan `{repo_path}` (default: cwd) for every type of natural language programming artifact. Classify each file found.
+
+If `{repo_path}` does not exist or is not a directory, report `Path not found: {repo_path}` and STOP. If the scan classifies zero files across every category below, report `No natural language programming artifacts found in {repo_path}.` and STOP before Step 3.
 
 **Skip directories**: `node_modules/`, `.git/`, `target/`, `dist/`, `build/`, `vendor/`, `__pycache__/`, `.next/`, `.venv/`, `.cache/`
 

@@ -1,6 +1,7 @@
 ---
 name: agent-design
 description: Use when creating, editing, or reviewing a cc-suite advisor agent (a value-over-rules persona under `.cc-suite/agents/`). Covers system-prompt phrasing, model choice, tool restrictions, working-dir scoping, budget/turn limits, and the file format. Use proactively whenever the user asks to "add an agent", "make an advisor", "write a reviewer", or edits anything under `.cc-suite/agents/`.
+version: 0.1.0
 ---
 
 # Designing cc-suite Advisor Agents
@@ -61,6 +62,8 @@ The body becomes the `CLAUDE_APPEND_PROMPT` (default) or `CLAUDE_SYSTEM_PROMPT` 
 The `description` field becomes the MCP tool description that Claude and Codex see when deciding whether to consult this advisor. Two `<example>` blocks showing realistic call sites teach the *caller* (not the advisor itself) when this advisor is the right one to invoke. Without them, the caller has only a one-liner to go on and tends to either over-call or under-call the advisor.
 
 Use a YAML literal block scalar (`description: |`) so newlines and `<example>` tags survive parsing. `bridge_agents.py` preserves the full multi-line value into `CLAUDE_DESCRIPTION` verbatim.
+
+> **This placement rule applies to advisor agent files only — it is the opposite of SKILL.md files.** An advisor's description becomes an MCP tool description, so examples belong inside it. A SKILL.md description is always-loaded trigger metadata that nlpm's R04 caps at 500 characters (-5) and 800 characters (-10); its `<example>` blocks go in a body section (this repo uses `## Example Invocations`), never in the frontmatter. Applying this section's advice to a SKILL.md file trades the missing-examples penalty for an oversized-description penalty.
 
 ## Writing the prompt: values, not procedures
 
@@ -157,11 +160,12 @@ These are starting points. Edit the values to match the project, narrow the scop
 
 ## After editing an agent
 
-Any edit to an agent file (creating, modifying, deleting) requires re-running the bridge:
+Any edit to an agent file (creating, modifying, deleting) requires re-running the bridge. The first line resolves the plugin root in both hosts — Claude Code sets `CLAUDE_PLUGIN_ROOT`; a Codex session resolves it from the bridged skills symlink:
 
 ```bash
-bash "${CLAUDE_PLUGIN_ROOT}/scripts/init.sh"     # or
-python3 "${CLAUDE_PLUGIN_ROOT}/scripts/bridge_agents.py"
+PLUGIN_ROOT="${CLAUDE_PLUGIN_ROOT:-$(dirname "$(dirname "$(readlink -f .claude/skills/cc-suite)")")}"
+bash "${PLUGIN_ROOT}/scripts/init.sh"     # or
+python3 "${PLUGIN_ROOT}/scripts/bridge_agents.py"
 ```
 
 `/cc-suite:add-agent` and `/cc-suite:remove-agent` do this automatically. `/cc-suite:repair` and `/cc-suite:update` re-bridge as part of their normal flow.
@@ -174,7 +178,21 @@ This skill covers **cc-suite advisor agent design** — claude-octopus-backed MC
 
 It does **not** cover:
 
-- **Claude Code's native subagent system** (Task tool, `.claude/agents/`) — a different mechanism with different semantics. Use those when you want to spawn a one-shot subagent in isolated context, not when you want a persistent consultative persona. See [`claude-architecture`](../../../../claude-architecture) for the native-agent surface.
+- **Claude Code's native subagent system** (Task tool, `.claude/agents/`) — a different mechanism with different semantics. Use those when you want to spawn a one-shot subagent in isolated context, not when you want a persistent consultative persona. See the Claude Code subagents documentation (https://code.claude.com/docs/en/sub-agents) for the native-agent surface.
 - **Skill authoring** — for writing skills (knowledge that loads on demand, no model invocation), refer to `cc-suite/claude-code-conventions` and the `nlpm:conventions` family.
 - **MCP server authoring from scratch** — `claude-octopus` is the MCP server; this skill describes how to *configure* it per advisor, not how to build a new MCP server.
 - **The bridge mechanics** — how `bridge_agents.py` writes `.mcp.json` and `.codex/config.toml`. See `scripts/bridge_agents.py` itself, plus `commands/init.md` / `repair.md` / `update.md` for when the bridge runs.
+
+## Example Invocations
+
+<example>
+Context: The user wants a persistent reviewer persona that both Claude and Codex can consult.
+user: "Add an advisor that pushes back on over-engineering in my API designs."
+assistant: "I'll load agent-design first — it defines the value-over-rules system-prompt shape, the tool restrictions advisors get by default, and the description block scalar that teaches callers when to consult it."
+</example>
+
+<example>
+Context: An existing advisor is being called too often for the wrong questions.
+user: "My security advisor keeps getting invoked for formatting questions — fix its definition."
+assistant: "I'll consult agent-design for the description and `<example>` block conventions, since that field is what the caller reads when deciding whether this advisor is the right one to invoke."
+</example>
