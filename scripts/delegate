@@ -1,0 +1,90 @@
+#!/usr/bin/env bash
+# delegate — universal cc-suite backend delegator.
+#
+# Any agent that can run a shell command (CodeBuddy, Codex, agy, grok, Hermes
+# shell-outs, or Claude Code) can reach any cc-suite backend through this one
+# script, without writing a per-pair runner. It forwards to the matching
+# <backend>-runner.mjs, which is a standalone ACP/CLI client.
+#
+# Usage:
+#   delegate <backend> [runner-flags...] -- <prompt>
+#   delegate <backend> <prompt words...>
+#
+# Backends: codex, agy, grok, qwen, codebuddy, qoder, hermes
+#
+# Examples:
+#   delegate codex "refactor src/foo.ts"
+#   delegate codebuddy --sandbox workspace-write -- "write a test for bar.ts"
+#   delegate grok --model grok-build -- "explain this crash"
+#
+# Environment:
+#   CC_SUITE_SCRIPTS  override the directory holding the *-runner.mjs files.
+
+set -e
+
+backend="${1:-}"
+if [ -z "$backend" ] || [ "$backend" = "-h" ] || [ "$backend" = "--help" ]; then
+  echo "Usage: delegate <backend> [runner-flags...] -- <prompt>" >&2
+  echo "Backends: codex, agy, grok, qwen, codebuddy, qoder, hermes" >&2
+  exit 2
+fi
+shift
+
+# Resolve this script's real directory (follows symlinks).
+self="$0"
+while [ -L "$self" ]; do
+  link="$(readlink "$self" 2>/dev/null || true)"
+  [ -z "$link" ] && break
+  case "$link" in
+    /*) self="$link" ;;
+    *)  self="$(dirname "$self")/$link" ;;
+  esac
+done
+here="$(cd "$(dirname "$self")" 2>/dev/null && pwd)"
+
+# Resolve the cc-suite scripts directory (newest cache install wins).
+scripts=""
+if [ -n "${CC_SUITE_SCRIPTS:-}" ] && [ -f "$CC_SUITE_SCRIPTS/${backend}-runner.mjs" ]; then
+  scripts="$CC_SUITE_SCRIPTS"
+elif [ -n "$here" ] && [ -f "$here/${backend}-runner.mjs" ]; then
+  scripts="$here"
+else
+  scripts="$(ls -dt "$HOME"/.claude/plugins/cache/*/cc-suite/*/scripts 2>/dev/null | head -1)"
+fi
+
+runner="${scripts:-/nonexistent}/${backend}-runner.mjs"
+if [ ! -f "$runner" ]; then
+  echo "delegate: unknown backend '$backend'" >&2
+  echo "  looked in: ${scripts:-<not found>}" >&2
+  echo "  backends: codex, agy, grok, qwen, codebuddy, qoder, hermes" >&2
+  exit 2
+fi
+
+# Split arguments: flags until the first '--', then the prompt. If no '--'
+# appears, every argument is the prompt and there are no flags.
+flags=()
+prompt_parts=()
+seen_dash=0
+for a in "$@"; do
+  if [ "$a" = "--" ]; then seen_dash=1; continue; fi
+  if [ "$seen_dash" -eq 0 ]; then flags+=("$a"); else prompt_parts+=("$a"); fi
+done
+if [ "$seen_dash" -eq 0 ]; then
+  prompt_parts=("$@")
+  flags=()
+fi
+prompt="${prompt_parts[*]}"
+
+if [ -z "$prompt" ] && [ ! -t 0 ]; then
+  prompt="$(cat)"
+fi
+if [ -z "$prompt" ]; then
+  echo "delegate: empty prompt" >&2
+  exit 2
+fi
+
+if [ ${#flags[@]} -gt 0 ]; then
+  exec node "$runner" --kind "$backend" "${flags[@]}" -- "$prompt"
+else
+  exec node "$runner" --kind "$backend" -- "$prompt"
+fi
