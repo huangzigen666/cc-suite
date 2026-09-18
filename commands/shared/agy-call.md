@@ -11,8 +11,16 @@ All Antigravity CLI calls go through `scripts/agy-runner.mjs`, which shells out 
 registers every call as a job — so `/cc-suite:status`, `/result`, and `/cancel` work
 identically for `agy` and Codex jobs.
 
-`agy` exposes **no MCP server mode**, so there is no MCP path to fall back on. The CLI
-is the only channel.
+`agy` **does** expose an MCP path: `scripts/bridge_agy_mcp.py` (invoked by
+`bridge_mcp.sh` whenever `antigravity` is an enabled tool, which is the default)
+mirrors `.mcp.json` into `.agents/mcp_config.json` and always adds a pinned
+`claude-code` server there, so a delegated `agy` session can call back into
+Claude the same way Codex can via claude-octopus. `scripts/agy-preflight.sh`'s
+`workspace_mcp_registered` / `claude_mcp_registered` fields report whether that
+registration is in place. This is confirmed to generate correctly
+(2026-09-18); whether `agy` actually invokes the tool when a delegated prompt
+tries to hand work back has not yet been verified against a live `agy` call —
+see `dev-docs/delegation-boundary-adversarial-test-2026-09-18.md`.
 
 > **The delegation boundary is injected for you.** `agy` reads the shared
 > `.agents/skills/` tree, which contains cc-suite's own skills for delegating *to*
