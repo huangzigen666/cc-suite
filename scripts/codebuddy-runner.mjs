@@ -105,9 +105,24 @@ function appendLog(logFile, message) {
 // server mode; the runner is the client. We forward an optional --model so the
 // caller can pin a model, but we do NOT pass a permission flag — the sandbox is
 // enforced on the client side via session/request_permission and fs/* handlers.
-function buildCodebuddyArgs(args) {
+//
+// --mcp-config <cwd>/.mcp.json is what actually makes the reverse channel
+// (CodeBuddy → Claude) live. CodeBuddy DOES read a project's .mcp.json on its
+// own, but a server merely *discovered* that way lands in a cautious
+// "Disabled (ask the user to enable via /mcp)" state — verified live,
+// reproduced across multiple projects, no headless way to approve it.
+// A server passed explicitly via --mcp-config instead connects immediately
+// (verified: identical .mcp.json content, six claude-code tools live,
+// ready: true, no gate) — --mcp-config is additive, not exclusive, unless
+// paired with --strict-mcp-config (not used here), and safely no-ops when
+// the file doesn't exist (verified: reports the server as merely unknown,
+// no crash). So: pass it whenever the project has a .mcp.json; omit it
+// otherwise, matching prior behavior exactly.
+function buildCodebuddyArgs(args, cwd) {
   const cbArgs = ["--acp"];
   if (args.model) cbArgs.push("--model", args.model);
+  const mcpConfigPath = path.join(cwd, ".mcp.json");
+  if (fs.existsSync(mcpConfigPath)) cbArgs.push("--mcp-config", mcpConfigPath);
   return cbArgs;
 }
 
@@ -116,7 +131,7 @@ function buildCodebuddyArgs(args) {
 function executeCodebuddy(cwd, args, logFile) {
   return new Promise((resolve) => {
     const alwaysApprove = args.sandbox !== "read-only";
-    const cbArgs = buildCodebuddyArgs(args);
+    const cbArgs = buildCodebuddyArgs(args, cwd);
 
     appendLog(logFile, `Exec: codebuddy ${cbArgs.join(" ")} (ACP client driving)`);
     appendLog(logFile, `Model: ${args.model || "(default)"}, Effort: ${args.effort || "(default)"}, Sandbox: ${args.sandbox}${args.resume ? ` (resuming ${args.resume})` : ""}`);
