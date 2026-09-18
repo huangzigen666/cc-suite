@@ -23,6 +23,9 @@ Each tool reads from its own files. `CLAUDE.md` and `AGENTS.md` sit next to each
 | **Claude → `agy` delegation** | `scripts/agy-runner.mjs` drives Antigravity CLI headlessly, with the same job tracking, background mode, deadline enforcement, and conversation resume as the Codex runner. |
 | **`agy` → Claude delegation** | The same claude-octopus MCP server, registered in `agy`'s workspace config. |
 | **Claude → Grok delegation** | `/cc-suite:grok` drives **Grok Build** over the Agent Client Protocol (`scripts/grok-runner.mjs` acts as the ACP client to `grok agent stdio`), with the same job tracking, background mode, deadline enforcement, and session resume as the Codex/agy runners. |
+| **Claude → CodeBuddy delegation** | `/cc-suite:codebuddy` drives **CodeBuddy** (Tencent) over ACP (`scripts/codebuddy-runner.mjs` as the ACP client to `codebuddy --acp`), same job-tracking/background/resume shape as the other runners. |
+| **CodeBuddy → Claude delegation** | Free once `.mcp.json` carries the `claude-code` server (already true for any project bridged for Codex/agy) — CodeBuddy reads `.mcp.json` itself in ACP mode, independent of anything the runner passes over the protocol. No separate bridge step. |
+| **Claude → Hermes delegation** | `/cc-suite:hermes` drives **Hermes Agent** over ACP (`scripts/hermes-runner.mjs` as the ACP client to `hermes acp`), same job-tracking/background/resume shape as the other runners. |
 | **Claude → Qwen review** | `/cc-suite:qwen-review` runs Qwen as a bounded critic: Safe Mode + Plan mode + sandbox, isolated target copies, explicit tool denials plus init-surface verification, a bounded `read_file` budget, strict terminal-result validation, verified file hashes, and at most two same-session resumes after incomplete output. |
 | **More coding agents (opt-in)** | `/cc-suite:bridge-tools` mirrors the project MCP surface into **Grok Build**, **opencode**, **Qwen Code**, and **Kimi CLI** — each selected in `.cc-suite.md`'s `## Enabled Tools` list. Grok, opencode, and Kimi read `AGENTS.md` and shared skills natively, so only MCP config is mirrored (per tool's native format); Qwen Code also gets a skills symlink and an instruction-file setting, since it reads neither by default. China-aware: Qwen/Kimi/opencode work natively in mainland China; Grok is VPN-only. |
 
@@ -102,6 +105,38 @@ Beyond the config bridge, cc-suite can **drive Grok Build as an agent**. `/cc-su
 | `--background` / `--resume <id>` | Same job-tracking + resume as the Codex/agy runners |
 
 It shares the runner infrastructure (`/cc-suite:status`, `/cc-suite:result`, `/cc-suite:cancel`) with the other backends — resume a Grok session via `/cc-suite:grok --resume <id>` (`/cc-suite:continue` resumes Codex threads only) — and gates on `/cc-suite:grok-preflight` — a fast, **local** readiness check (binary + auth, no network round-trip) that fails fast with a `grok login` hint instead of hanging until the deadline. Pair it with the MCP bridge (`grok` enabled in `## Enabled Tools`) so Grok can call *back* into Claude via the `claude-code` server — a full round trip. Requires the `grok` binary on PATH ([install](https://x.ai/cli)).
+
+## Claude → CodeBuddy delegation (ACP)
+
+`/cc-suite:codebuddy "<prompt>"` drives **CodeBuddy** (Tencent) the same way as the Grok lane:
+
+```bash
+/cc-suite:codebuddy "Review the changes on this branch for correctness bugs"
+/cc-suite:codebuddy --sandbox workspace-write "Add a --json flag to the CLI"
+/cc-suite:codebuddy --resume <session-id> "Now also update the tests"
+```
+
+`scripts/codebuddy-runner.mjs` is the ACP client to `codebuddy --acp`. Unlike the Grok lane, sandboxing is enforced client-side rather than by a launch flag: under ACP, CodeBuddy sends `session/request_permission` and `fs/*` requests back to the runner, which the runner grants or denies per `--sandbox` (`read-only` denies writes and permission requests; `workspace-write`/`danger-full-access` approve them). `--model` is forwarded as a CLI launch arg when given; there is no `--effort` flag (ACP has no standard reasoning-effort parameter). Gates on `/cc-suite:codebuddy-preflight`. Requires the `codebuddy` binary on PATH.
+
+**The reverse channel needs no bridge-side config, but it is not always enabled by default.** CodeBuddy reads the project's `.mcp.json` itself when it starts in ACP mode — no separate mirroring step, and `scripts/codebuddy-runner.mjs` doesn't need to (and doesn't) pass anything through the ACP `mcpServers` field to make this happen; that field stays `[]` in both `session/new` and `session/load` by design. But CodeBuddy can gate a discovered server behind manual approval: `WaitForMcpServers` has repeatedly reported `claude-code` as `Disabled (ask the user to enable via /mcp)` in fresh test projects — reproduced from three different directories (including one covered by CodeBuddy's own `trustedDirectories: ["/Users/**"]` setting) and via both `codebuddy-runner.mjs` and a bare hand-rolled ACP client, so it isn't specific to this runner's handshake. A prior single successful connection (all 6 tools live, no approval prompt) was observed once and hasn't reproduced since — the exact condition that flips it is still unidentified. Until that's understood, treat the reverse channel as *reachable, not guaranteed live*: run `/mcp` inside an interactive CodeBuddy session in the target project to check and, if needed, approve it before relying on a real round trip.
+
+## Claude → Hermes delegation (ACP)
+
+`/cc-suite:hermes "<prompt>"` drives **Hermes Agent** the same way:
+
+```bash
+/cc-suite:hermes "Summarize the open TODOs in this repo"
+/cc-suite:hermes --sandbox workspace-write "Fix the failing test in src/foo.test.ts"
+```
+
+`scripts/hermes-runner.mjs` is the ACP client to `hermes acp --accept-hooks`, with the same client-side sandbox enforcement as the CodeBuddy lane (`session/request_permission` + `fs/*`, not a launch flag). Model selection is left to Hermes' own configuration — the ACP `session/new` call has no standard model parameter, so `--model` is accepted but not forwarded. Gates on `/cc-suite:hermes-preflight`. Requires the `hermes` binary on PATH.
+
+**The reverse channel is opt-in, via an isolated Hermes profile.** Hermes' own MCP surface (`hermes mcp add/list/test`) has no project-scoped equivalent to `.mcp.json` — it's a single store, resolved from `HERMES_HOME` (default `~/.hermes/`), shared by every invocation that doesn't override it. Registering `claude-code` there directly would leak into every one of the user's Hermes sessions, not just cc-suite delegation. Two things had to be fixed before this worked:
+
+1. **A missing optional dependency, not an ACP or MCP limitation.** The installed `hermes-agent` build was missing the `mcp` Python SDK extra, so it could not connect *any* MCP server — confirmed because the user's own pre-existing, unrelated servers failed identically via `hermes mcp test <name>`. For a `uv tool`-managed install (`uv tool list` shows the exact pinned version), the fix is `uv tool install 'hermes-agent[mcp,acp]==<pinned-version>' --force` — **not** `pip install 'hermes-agent[mcp]'`, which targets an unrelated, non-isolated environment and silently does nothing. Reinstalling with only the extra you think you need can also silently drop extras the existing install already had (this happened once while building this: `[mcp]` alone regressed ACP support that `[all]`/whatever the original spec was had provided) — specify every extra you need, or use `[all]`, not an incremental one.
+2. **`HERMES_PROFILE` looked like the per-invocation profile selector and isn't** — grep-confirmed against the installed package, that name is only consumed by Hermes' kanban subsystem. The real mechanism is `HERMES_HOME`: set it to `~/.hermes/profiles/<name>` (a profile created with `hermes profile create <name> --no-alias --no-skills`) and every subcommand — `mcp add`, `mcp list`, `acp` — operates on that directory instead of the default. Using `HERMES_PROFILE` for isolation silently writes to the *global* default config instead — confirmed the hard way.
+
+With both fixed, `HERMES_HOME=~/.hermes/profiles/<name> hermes mcp add claude-code --command npx --args -y claude-octopus@1.2.0` registers the server in that profile only, and `scripts/hermes-runner.mjs` picks it up via **`CC_SUITE_HERMES_HOME=~/.hermes/profiles/<name>`** (unset by default; behavior is otherwise unchanged), which the runner passes through as `HERMES_HOME` to the spawned `hermes acp` child. Verified live: the ACP adapter's own log shows `MCP server 'claude-code' (stdio): registered 6 tool(s)`. A full round trip (the agent actually deciding to call one) additionally needs that profile to have a working model/provider configured — a fresh profile has none by default and inherits nothing from the default profile's credentials.
 
 ## Claude → Qwen review
 
@@ -199,6 +234,8 @@ claude plugin install cc-suite@xiaolai --scope project
 - [Codex CLI](https://github.com/openai/codex) installed — required for Claude→Codex delegation commands
 - [Antigravity CLI](https://github.com/google-antigravity/antigravity-cli) (`agy`) installed — required for Google-backed delegation and `/cc-suite:agy-preflight`
 - [Grok Build](https://x.ai/cli) (`grok`, xAI) installed — required for the Claude→Grok ACP delegation lane (`/cc-suite:grok`) and `/cc-suite:grok-preflight`
+- CodeBuddy (`codebuddy`, Tencent) installed — required for the Claude→CodeBuddy ACP delegation lane (`/cc-suite:codebuddy`) and `/cc-suite:codebuddy-preflight`
+- Hermes Agent (`hermes`) installed — required for the Claude→Hermes ACP delegation lane (`/cc-suite:hermes`) and `/cc-suite:hermes-preflight`
 - [Qwen Code](https://github.com/QwenLM/qwen-code) (`qwen`, ≥ 0.21.0) installed — required for `/cc-suite:qwen-review` and `/cc-suite:qwen-preflight`
 - [claude-octopus](https://www.npmjs.com/package/claude-octopus) — required for Codex→Claude delegation. Delivered via `npx -y` at runtime, no pre-install needed. Uses the same credential store as Claude CLI (`~/.claude/.credentials.json`).
 

@@ -35,6 +35,34 @@
 //                        permission requests, so Hermes can write.
 //   danger-full-access → the client approves everything (same file-I/O
 //                        posture as workspace-write).
+//
+// Reverse channel (Hermes → Claude): opt-in only, via CC_SUITE_HERMES_HOME.
+// Hermes has no project-scoped MCP config — `hermes mcp add` writes to
+// wherever HERMES_HOME points (default ~/.hermes/config.yaml, shared by
+// every invocation), so registering a `claude-code` server there without
+// isolation would leak into the user's every Hermes session, not just
+// cc-suite delegation. The isolation primitive is HERMES_HOME itself, NOT
+// HERMES_PROFILE — that name exists in hermes_cli but is only consumed by
+// the kanban subsystem (grep-confirmed against the installed package); the
+// general config/MCP/ACP path resolves everything through
+// hermes_constants.get_hermes_home(), which reads HERMES_HOME. Verified live:
+// `HERMES_HOME=~/.hermes/profiles/<name> hermes mcp add ...` writes only
+// `~/.hermes/profiles/<name>/config.yaml` and leaves the default profile's
+// config untouched; `HERMES_PROFILE=<name>` for the same command silently
+// wrote to the *default* global config instead — a real, confirmed footgun,
+// not a hypothetical one.
+//
+// Setup: `hermes profile create <name> --no-alias --no-skills` (creates the
+// directory HERMES_HOME will point at), then `HERMES_HOME=~/.hermes/profiles/<name>
+// hermes mcp add claude-code --command npx --args -y claude-octopus@1.2.0`.
+// Then set CC_SUITE_HERMES_HOME=~/.hermes/profiles/<name> for this runner.
+// Unset (default): behavior is identical to before this existed.
+//
+// Depends on the installed hermes-agent build having the optional `mcp`
+// Python SDK extra (`uv tool install 'hermes-agent[mcp]==<pinned-version>'
+// --force` for a uv-tool install — plain `pip install` targets the wrong,
+// non-isolated environment and silently does nothing). Confirm with
+// `hermes mcp test <any-server>` before relying on this path.
 
 import fs from "node:fs";
 import path from "node:path";
@@ -119,14 +147,20 @@ function executeHermes(cwd, args, logFile) {
     const alwaysApprove = args.sandbox !== "read-only";
     const hermesArgs = buildHermesArgs(args);
 
+    const delegationHome = process.env.CC_SUITE_HERMES_HOME || null;
+
     appendLog(logFile, `Exec: hermes ${hermesArgs.join(" ")} (ACP client driving)`);
     appendLog(logFile, `Model: ${args.model || "(hermes default)"}, Effort: ${args.effort || "(default)"}, Sandbox: ${args.sandbox}${args.resume ? ` (resuming ${args.resume})` : ""}`);
+    if (delegationHome) appendLog(logFile, `Delegation home: ${delegationHome} (HERMES_HOME)`);
     appendLog(logFile, `Deadline: ${Math.round(args.timeoutMs / 1000)}s`);
 
     const child = spawn("hermes", hermesArgs, {
       cwd,
       stdio: ["pipe", "pipe", "pipe"], // stdin: JSON-RPC out, stdout: JSON-RPC in
-      env: { ...process.env },
+      env: {
+        ...process.env,
+        ...(delegationHome ? { HERMES_HOME: delegationHome } : {}),
+      },
     });
 
     const startedAt = Date.now();
