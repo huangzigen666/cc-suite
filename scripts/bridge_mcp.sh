@@ -461,7 +461,29 @@ else
   AGY_RC=0
 fi
 
+# Qoder's project-scope MCP config is .mcp.json itself (no separate target to
+# mirror into or withdraw from), so unlike the Codex/agy sections above there
+# is no teardown branch: disabling qoder never removes the claude-code entry
+# mcp_qoder.sh added, because .mcp.json is shared, user-facing, and read by
+# Claude Code's own project MCP listing too — there is no way to tell "cc-suite
+# added this" from "the user wants claude-code in .mcp.json for their own
+# reasons" without a provenance scheme this shared file does not have, and
+# guessing wrong here means silently deleting the user's own entry.
+if tool_enabled qoder; then
+  if bash "$SCRIPT_DIR/mcp_qoder.sh";
+  then
+    QODER_RC=0
+  else
+    QODER_RC=$?
+  fi
+else
+  QODER_RC=0
+fi
+
 if [ "$CODEX_RC" -ne 0 ]; then
   exit "$CODEX_RC"
 fi
-exit "$AGY_RC"
+if [ "$AGY_RC" -ne 0 ]; then
+  exit "$AGY_RC"
+fi
+exit "$QODER_RC"

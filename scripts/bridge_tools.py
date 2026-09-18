@@ -93,6 +93,15 @@ PROFILES: dict[str, dict] = {
         "china_tier": "C",
         "aliases": ["agy"],
     },
+    "qoder": {
+        "display_name": "Qoder CLI",
+        "binary": "qoder",
+        "bridged_by": "existing",
+        # China-network behavior not verified — omitted rather than guessed.
+        # See status/init-picker code, which already falls back gracefully
+        # (`.get("china_tier", "?")`) when this key is absent.
+        "aliases": ["qodercli"],
+    },
     "grok": {
         "display_name": "Grok Build (xAI)",
         "binary": "grok",

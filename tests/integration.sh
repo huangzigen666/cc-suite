@@ -2280,7 +2280,7 @@ assert_exit0 python3 -c "
 import json
 d = {t['id']: t for t in json.load(open('detect.json'))}
 assert d['claude']['installed'] is True, 'claude must always be installed'
-assert set(d) == {'claude','codex','antigravity','grok','opencode','qwen','kimi'}, d.keys()
+assert set(d) == {'claude','codex','antigravity','qoder','grok','opencode','qwen','kimi'}, d.keys()
 "
 
 printf '# cc-suite\n\nSettings.\n' > .cc-suite.md
@@ -2646,6 +2646,55 @@ JSON
 assert_exit0 python3 "$SCRIPTS/bridge_tools.py" --tools grok
 assert_contains ".grok/config.toml" "[mcp_servers.claude-code]"      # MCP entry still emitted
 assert_contains "$TRUST_FILE" "trusted = false"                     # human's distrust decision untouched
+cleanup
+
+# ═══════════════════════════════════════════════════════════════════════════════
+section "T82: mcp_qoder.sh — registers claude-code straight into .mcp.json, idempotent"
+# ═══════════════════════════════════════════════════════════════════════════════
+make_tmp
+cat > .mcp.json <<'JSON'
+{ "mcpServers": { "codex-cli": { "type": "stdio", "command": "codex", "args": ["mcp-server"] } } }
+JSON
+
+assert_exit0 bash "$SCRIPTS/mcp_qoder.sh"
+assert_contains ".mcp.json" '"claude-code"'
+assert_contains ".mcp.json" '"codex-cli"'                            # other entries untouched
+assert_exit0 python3 -c "import json; json.load(open('.mcp.json'))" # still valid JSON
+
+# Re-run: idempotent, no duplicate/rewrite beyond the one key.
+before="$(cat .mcp.json)"
+assert_exit0 bash "$SCRIPTS/mcp_qoder.sh"
+after="$(cat .mcp.json)"
+if [ "$before" = "$after" ]; then ok_msg ".mcp.json byte-identical on re-run"
+else fail_msg ".mcp.json changed on a no-op re-run"; fi
+cleanup
+
+section "T82b: mcp_qoder.sh — refuses when claude-code is already a different program"
+make_tmp
+cat > .mcp.json <<'JSON'
+{ "mcpServers": { "claude-code": { "type": "stdio", "command": "some-other-tool", "args": [] } } }
+JSON
+assert_exit_nonzero bash "$SCRIPTS/mcp_qoder.sh"
+assert_contains ".mcp.json" "some-other-tool"                        # left untouched, not overwritten
+cleanup
+
+section "T82c: bridge_mcp.sh — qoder enabled via .cc-suite.md adds claude-code; disabled leaves it alone"
+make_tmp
+cat > .mcp.json <<'JSON'
+{ "mcpServers": { "codex-cli": { "type": "stdio", "command": "codex", "args": ["mcp-server"] } } }
+JSON
+printf '## Enabled Tools\n- [x] claude\n- [x] qoder\n' > .cc-suite.md
+assert_exit0 bash "$SCRIPTS/bridge_mcp.sh"
+assert_contains ".mcp.json" '"claude-code"'
+cleanup
+
+make_tmp
+cat > .mcp.json <<'JSON'
+{ "mcpServers": { "codex-cli": { "type": "stdio", "command": "codex", "args": ["mcp-server"] } } }
+JSON
+printf '## Enabled Tools\n- [x] claude\n' > .cc-suite.md
+assert_exit0 bash "$SCRIPTS/bridge_mcp.sh"
+assert_not_contains ".mcp.json" '"claude-code"'                      # qoder not enabled → not added
 cleanup
 
 # ═══════════════════════════════════════════════════════════════════════════════
