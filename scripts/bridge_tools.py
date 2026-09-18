@@ -35,6 +35,7 @@ import json
 import os
 import re
 import sys
+import time
 import tempfile
 from pathlib import Path
 
@@ -98,6 +99,14 @@ PROFILES: dict[str, dict] = {
         "bridged_by": "registry",
         "china_tier": "C",
         "mcp": {"format": "toml-mcp_servers", "path": ".grok/config.toml", "scope": "project"},
+        # Grok refuses to start a repo-local ("project"-scope) MCP server —
+        # including the claude-code one this bridge just wrote — in a folder it
+        # has not marked trusted (confirmed 2026-09-18 against grok 1.0.34:
+        # `grok mcp doctor` reports "folder untrusted" and the server never
+        # starts, even though the emitted TOML is correct). Trust is recorded
+        # globally, per absolute path, in this file — independent of
+        # .grok/config.toml — so emitting the entry is not enough on its own.
+        "folder_trust": "~/.grok/trusted_folders.toml",
     },
     "opencode": {
         "display_name": "opencode (SST)",
@@ -468,6 +477,71 @@ _TOML_SERVER_TABLE_RE = re.compile(
 def _toml_server_tables(text: str) -> set[str]:
     """Server names declared by `[mcp_servers.<name>]` headers in `text`."""
     return {_toml_unquote(m.group(1)) for m in _TOML_SERVER_TABLE_RE.finditer(text)}
+
+
+_TOML_FOLDER_TABLE_RE = re.compile(
+    r'^\s*\[\s*folders\s*\.\s*'
+    r'("(?:[^"\\]|\\.)*"|\'[^\']*\')'
+    r'\s*\]\s*(?:#.*)?$'
+)
+
+
+def grant_folder_trust(trust_file: Path, folder: Path) -> str:
+    """Idempotently mark `folder` trusted in a Grok-style trusted_folders.toml.
+
+    Structural line scan, not a TOML parse — same tradeoff as the rest of this
+    file's hand-written TOML handling, and safe here because the only thing
+    read back is one `trusted = true|false` line inside the matched table.
+
+    Never touches any table but `folder`'s own, and never overrides an
+    existing explicit `trusted = true` or `trusted = false` for it — a prior
+    human decision about that specific folder is not this bridge's to change.
+    Called every run (not just when the MCP config itself changed), because
+    trust and the MCP entry are two independent pieces of state and either can
+    have been reverted on its own.
+    """
+    folder_str = str(folder)
+    try:
+        text = trust_file.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        text = ""
+
+    lines = text.splitlines()
+    start = None
+    existing_trusted: bool | None = None
+    i = 0
+    while i < len(lines):
+        m = _TOML_FOLDER_TABLE_RE.match(lines[i])
+        if m and _toml_unquote(m.group(1)) == folder_str:
+            start = i
+            j = i + 1
+            while j < len(lines) and not re.match(r"^\s*\[", lines[j]):
+                tm = re.match(r"^\s*trusted\s*=\s*(true|false)\s*(?:#.*)?$", lines[j])
+                if tm:
+                    existing_trusted = tm.group(1) == "true"
+                j += 1
+            break
+        i += 1
+
+    if start is not None:
+        if existing_trusted is True:
+            return f"already trusted: {folder_str}"
+        if existing_trusted is False:
+            return f"explicitly distrusted — left alone: {folder_str}"
+        return f"has a [folders.{_toml_str(folder_str)}] block with no readable trusted= — left alone"
+
+    block = [
+        f"[folders.{_toml_str(folder_str)}]",
+        "trusted = true",
+        f"decided_at = {int(time.time())}",
+    ]
+    new_lines = list(lines)
+    if new_lines and new_lines[-1].strip() != "":
+        new_lines.append("")
+    new_lines.extend(block)
+    trust_file.parent.mkdir(parents=True, exist_ok=True)
+    _atomic_write_text(trust_file, "\n".join(new_lines) + "\n")
+    return f"trusted {folder_str}"
 
 
 def resolve_path(spec: dict) -> Path:
@@ -898,6 +972,10 @@ def bridge_tool(tool_id: str, servers: dict[str, dict]) -> None:
     ok(f"{name}: {'mirrored' if changed else 'already current'} {count} server(s) → {label}")
     for server, missing in redacted.items():
         warn(f"  {name}/{server}: set manually (not mirrored): {', '.join(missing)}")
+
+    if "folder_trust" in prof:
+        trust_file = Path(prof["folder_trust"]).expanduser()
+        note(f"{name}: {grant_folder_trust(trust_file, ROOT.resolve())}")
 
     if "skills_symlink" in prof:
         note(f"{name}: {link_skills(prof['skills_symlink'])}")

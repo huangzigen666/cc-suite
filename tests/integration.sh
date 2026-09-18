@@ -2609,6 +2609,46 @@ assert_contains "pf.json" '"error_code":"qwen_not_found"'
 cleanup
 
 # ═══════════════════════════════════════════════════════════════════════════════
+section "T81: bridge_tools.py — grok folder-trust grant (grok refuses untrusted repo-local MCP servers)"
+# ═══════════════════════════════════════════════════════════════════════════════
+make_tmp
+TRUST_FILE="$HOME/.grok/trusted_folders.toml"
+PROJECT_PATH="$(python3 -c 'import os; print(os.path.realpath(os.getcwd()))')"
+cat > .mcp.json <<'JSON'
+{ "mcpServers": { "codex-cli": { "type": "stdio", "command": "codex", "args": ["mcp-server"] } } }
+JSON
+
+assert_exit0 python3 "$SCRIPTS/bridge_tools.py" --tools grok
+assert_contains ".grok/config.toml" "[mcp_servers.claude-code]"
+assert_file      "$TRUST_FILE"
+assert_contains  "$TRUST_FILE" "[folders.\"${PROJECT_PATH}\"]"
+assert_contains  "$TRUST_FILE" "trusted = true"
+
+# Re-run: idempotent, no duplicate table for the same path.
+assert_exit0 python3 "$SCRIPTS/bridge_tools.py" --tools grok
+assert_count "[folders.\"${PROJECT_PATH}\"]" "$TRUST_FILE" 1
+cleanup
+
+section "T81b: bridge_tools.py — grok folder-trust never overrides an explicit trusted=false"
+make_tmp
+TRUST_FILE="$HOME/.grok/trusted_folders.toml"
+PROJECT_PATH="$(python3 -c 'import os; print(os.path.realpath(os.getcwd()))')"
+mkdir -p "$(dirname "$TRUST_FILE")"
+cat > "$TRUST_FILE" <<TOML
+[folders."${PROJECT_PATH}"]
+trusted = false
+decided_at = 1700000000
+TOML
+cat > .mcp.json <<'JSON'
+{ "mcpServers": { "codex-cli": { "type": "stdio", "command": "codex", "args": ["mcp-server"] } } }
+JSON
+
+assert_exit0 python3 "$SCRIPTS/bridge_tools.py" --tools grok
+assert_contains ".grok/config.toml" "[mcp_servers.claude-code]"      # MCP entry still emitted
+assert_contains "$TRUST_FILE" "trusted = false"                     # human's distrust decision untouched
+cleanup
+
+# ═══════════════════════════════════════════════════════════════════════════════
 # Summary
 # ═══════════════════════════════════════════════════════════════════════════════
 echo
