@@ -107,7 +107,9 @@ Parse the single JSON object from stdout.
 - **Background**: return the queued `jobId` and point to `/cc-suite:status`,
   `/cc-suite:result`, `/cc-suite:cancel`.
 
-On `failed` or `stalled`, report the `error` and `jobId` (inspect with
-`/cc-suite:status {jobId}`). Do not auto-retry — the runner already recorded the
-diagnostic log and, on timeout, already cancelled and killed the CodeBuddy
-process.
+On `failed`, `stalled`, or `blocked`, report the `error` and `jobId` (inspect with
+`/cc-suite:status {jobId}`). `blocked` is a policy denial, not a timeout: under
+`--sandbox read-only` the runner denied a permission request — including an MCP
+tool call — so re-run with `--sandbox workspace-write` only if the task genuinely
+needs it. On `stalled` the deadline already cancelled and killed the CodeBuddy
+process. Do not auto-retry.

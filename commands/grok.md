@@ -19,11 +19,15 @@ deadline-bounded and killable, and registers every call as a job, so
 Codex and agy backends. Grok can call back into Claude through the `claude-code`
 MCP server if it's bridged (`/cc-suite:bridge-tools` with grok enabled).
 
-> **The delegation boundary is injected for you.** Grok reads `AGENTS.md` and the
-> shared `.agents/skills/` tree natively, so it can see cc-suite's own skills for
-> delegating *to* Claude Code. The runner prepends `lib/delegation-boundary.mjs` to
-> every prompt so a delegated task is not handed straight back to its author. Do not
-> restate it in the prompt; it is already there.
+> **The delegation boundary is injected for you.** The runner prepends
+> `lib/delegation-boundary.mjs` to every prompt so a delegated task is not handed
+> straight back to its author. Do not restate it in the prompt; it is already there.
+>
+> Two limits are worth knowing. The boundary names specific *workspace skills*, so
+> it does not by itself cover handing work back through an MCP tool such as
+> `claude-code`. And those skills are only visible to grok where `.agents/skills`
+> has been bridged (`bridge_skills.sh`) — in a repo without it, the boundary has
+> nothing to suppress.
 
 ## User Input
 
@@ -72,7 +76,7 @@ The runner maps cc-suite sandbox levels onto Grok's ACP permission behavior:
 
 | cc-suite `--sandbox` | Grok behavior |
 |---|---|
-| `read-only` | No auto-approve; the client denies file writes. Grok reads and reasons. Best-effort — a global `permission_mode = "always-approve"` in `~/.grok/config.toml` can pre-approve tools, so it's not a hard kernel sandbox. |
+| `read-only` | The runner passes a top-level `--permission-mode default`, which overrides any global `permission_mode` in the user config; grok then asks before privileged actions and the client can deny them. Reads keep working. This covers MCP tools (for example `claude-code`), not just file writes. Not a kernel sandbox — the agent still reasons over whatever it can read. |
 | `workspace-write` | `--always-approve`; Grok reads and writes files in the workspace. |
 | `danger-full-access` | `--always-approve` (Grok has no stricter tier over ACP). |
 
@@ -109,6 +113,9 @@ Parse the single JSON object from stdout.
 - **Background**: return the queued `jobId` and point to `/cc-suite:status`,
   `/cc-suite:result`, `/cc-suite:cancel`.
 
-On `failed` or `stalled`, report the `error` and `jobId` (inspect with
-`/cc-suite:status {jobId}`). Do not auto-retry — the runner already recorded the
-diagnostic log and, on timeout, already cancelled and killed the Grok process.
+On `failed`, `stalled`, or `blocked`, report the `error` and `jobId` (inspect with
+`/cc-suite:status {jobId}`). `blocked` is a policy denial, not a timeout: under
+`--sandbox read-only` the runner denied a permission request — including an MCP
+tool call — so re-run with `--sandbox workspace-write` only if the task genuinely
+needs it. On `stalled` the deadline already cancelled and killed the Grok process.
+Do not auto-retry.

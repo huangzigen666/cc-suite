@@ -78,7 +78,7 @@ node "${CLAUDE_PLUGIN_ROOT}/scripts/codex-runner.mjs" \
 
 Parse the JSON result; the `rawOutput` is Codex's reply. Note: `resume` inherits the original session's sandbox — to grant write access, start a fresh command instead (e.g. `/implement`).
 
-**If the runner returns `failed`/`stalled`** (session id not found, or deadline exceeded):
+**If the runner returns `failed`/`stalled`/`blocked`** (session id not found, deadline exceeded, or the client denied a permission request under `--sandbox read-only`):
 
 ```
 Session `{threadId}` could not be resumed (status: {status}). Job: {jobId} — inspect with /cc-suite:status {jobId}.

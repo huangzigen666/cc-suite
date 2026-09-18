@@ -58,3 +58,9 @@ GEMINI.md
 
 # dev probe artifacts (large binaries, never commit)
 dev-probes/
+
+# Local tool-profile bridge scaffold (.grok/config.toml), created when this repo is
+# used as its own bridge target — same rationale as the managed .codex/config.toml
+# entry. Kept OUTSIDE the cc-suite sentinel block on purpose: ensure_gitignore.sh
+# rewrites that block, so an entry added there would be dropped silently.
+.grok/

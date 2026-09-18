@@ -23,12 +23,13 @@
 // job's threadId, so /cc-suite:continue resumes the same Grok session.
 //
 // Sandbox mapping (cc-suite vocabulary → ACP permission behavior):
-//   read-only          → no --always-approve; the client REJECTS permission
-//                        requests and denies fs writes. Grok can still run tools
-//                        that need no permission (reads). Caveat: a global
-//                        permission_mode="always-approve" in ~/.grok/config.toml
-//                        can pre-approve tools before the client is consulted;
-//                        read-only is best-effort, not a hard sandbox.
+//   read-only          → a top-level --permission-mode default is passed ahead of
+//                        the `agent` subcommand, overriding any global
+//                        permission_mode in the user's config. Grok then asks
+//                        before privileged actions and the client denies them —
+//                        reads still work, and this covers MCP tools too, not
+//                        just fs writes. Still not a kernel sandbox: the agent
+//                        reasons over whatever it can already read.
 //   workspace-write    → --always-approve; the client serves fs read/write.
 //   danger-full-access → --always-approve (Grok has no stricter tier via ACP).
 
@@ -163,8 +164,15 @@ function appendLog(logFile, message) {
 
 // Build the `grok agent` argv. Parent-level flags (--model, --effort,
 // --always-approve) precede the `stdio` subcommand.
+//
+// read-only must be a real constraint. `--permission-mode` is a *top-level*
+// flag, so it precedes the `agent` subcommand and overrides a global
+// `permission_mode` in the user config. Without it, an `always-approve` config
+// self-approves tool calls, the client never receives
+// `session/request_permission`, and read-only has nothing to deny — including
+// MCP tools that can drive other agents. Verified on grok 1.0.34.
 function buildGrokArgs(args, alwaysApprove) {
-  const grokArgs = ["agent"];
+  const grokArgs = alwaysApprove ? ["agent"] : ["--permission-mode", "default", "agent"];
   if (args.model) grokArgs.push("--model", args.model);
   if (args.effort) grokArgs.push("--reasoning-effort", args.effort);
   if (alwaysApprove) grokArgs.push("--always-approve");
@@ -410,13 +418,18 @@ function executeGrok(cwd, args, logFile) {
       childClosed = true;
       rejectAllPending(new Error(`grok exited (${code === null ? `signal ${signal}` : `code ${code}`})`));
       if (settled) return;
-      // The prompt already returned. Its stopReason is the authoritative verdict
-      // and the awaiting flow is guaranteed to settle, so exiting promptly after
-      // a turn is normal shutdown — not an incomplete run.
-      if (phase === "done") return;
       const rawOutput = answer.join("").trim();
       if (timedOut) {
+        // The deadline always wins. When it fires while the prompt response is
+        // already in flight, the awaiting flow returns without settling, so this
+        // handler must settle — checking `phase === "done"` first would leave the
+        // promise unresolved and the job stuck `running` forever.
         finish({ status: "stalled", errorMessage: `Timed out after ${Math.round(args.timeoutMs / 1000)}s`, sessionId: acpSessionId, rawOutput });
+      } else if (phase === "done") {
+        // The prompt already returned. Its stopReason is the authoritative verdict
+        // and the awaiting flow is guaranteed to settle, so exiting promptly after
+        // a turn is normal shutdown — not an incomplete run.
+        return;
       } else if (code !== 0) {
         // A nonzero exit is a failure even when partial answer chunks arrived;
         // rawOutput still carries whatever was received.
@@ -557,7 +570,10 @@ function executeGrok(cwd, args, logFile) {
             finish({ status: "failed", errorMessage: "grok returned no stopReason and no answer", sessionId: acpSessionId, rawOutput });
           }
         } else if (stop === "cancelled" || stop === "canceled") {
-          finish({ status: "stalled", errorMessage: `grok stopReason=${stop}`, sessionId: acpSessionId, rawOutput });
+          // The client (this runner) denied a permission request, or the turn
+          // was cancelled. That is a policy decision, not a hang — reporting
+          // `stalled` would conflate a deliberate denial with a deadline.
+          finish({ status: "blocked", errorMessage: `grok stopReason=${stop}`, sessionId: acpSessionId, rawOutput });
         } else if (stop === "refusal") {
           finish({ status: "failed", errorMessage: "grok refused the request (stopReason=refusal)", sessionId: acpSessionId, rawOutput });
         } else if (stop === "max_tokens" || stop === "max_turn_requests") {

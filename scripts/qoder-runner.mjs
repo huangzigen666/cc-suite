@@ -228,6 +228,19 @@ function executeQoder(cwd, args, logFile) {
       if (resultReceived) {
         const out = (finalResult != null ? finalResult : answer.join("")).trim();
         const failed = finalSubtype === "error";
+        if (!failed && code !== 0) {
+          // A terminal success result plus a nonzero exit is a mismatch, not a
+          // success — the process failed after reporting. Same rule the qwen
+          // runner enforces as `exit_mismatch`; reporting `completed` here is the
+          // false success this codebase treats as its worst failure mode.
+          finish({
+            status: "failed",
+            sessionId: finalSessionId || sessionId,
+            rawOutput: out,
+            errorMessage: `qoder reported a success result but ${msg}`,
+          });
+          return;
+        }
         finish({
           status: failed ? "failed" : "completed",
           sessionId: finalSessionId || sessionId,
@@ -237,11 +250,25 @@ function executeQoder(cwd, args, logFile) {
         return;
       }
       if (answer.length > 0 && anyJsonParsed) {
+        // No terminal result event, but the stream produced an answer. Only a
+        // clean exit makes that a success; the partial output is still reported
+        // when the exit says otherwise.
+        if (code !== 0) {
+          finish({
+            status: "failed",
+            errorMessage: stderrTail.trim() || `qoder exited ${msg} after streaming an answer`,
+            sessionId,
+            rawOutput: answer.join("").trim(),
+          });
+          return;
+        }
         finish({ status: "completed", sessionId, rawOutput: answer.join("").trim() });
         return;
       }
-      if (rawStdout.trim().length > 0) {
+      if (rawStdout.trim().length > 0 && code === 0) {
         // Plain-text fallback: stream-json was not honored, stdout is the answer.
+        // Gated on a clean exit — a nonzero exit with a line of error text on
+        // stdout is a failure, not an answer.
         finish({ status: "completed", sessionId, rawOutput: rawStdout.trim() });
         return;
       }

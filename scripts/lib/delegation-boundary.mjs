@@ -61,6 +61,11 @@ export const DELEGATION_BOUNDARY = [
   "Perform the analysis yourself and return the result directly.",
   "Do not activate or invoke workspace skills that hand the task back to Claude Code —",
   `${DELEGATING_SKILLS.join(", ")} all delegate to Claude Code and must not be used here.`,
+  // The enumerated skills are only one route. A bridged MCP server (for example
+  // `claude-code`) can hand the work back without touching any workspace skill,
+  // so this sentence closes that route without naming tools — tool names vary by
+  // project and a hardcoded list would go stale or catch unrelated tools.
+  "Do not hand this task back to Claude Code by any route — workspace skill, MCP tool, subagent, or message.",
   INVARIANT_NO_RETURN_TO_AUTHOR,
 ].join(" ");
 

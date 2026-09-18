@@ -142,6 +142,7 @@ function executeHermes(cwd, args, logFile) {
     let resumeFellBack = false; // resume requested, but session/load failed and a fresh session was started
     let lastChunkAt = 0;
     let childClosed = false;
+    let phase = "spawn"; // spawn → session → prompt → done
 
     const send = (obj) => { try { child.stdin.write(JSON.stringify(obj) + "\n"); } catch { /* child gone */ } };
     const rpc = (method, params) => new Promise((res, rej) => {
@@ -288,11 +289,25 @@ function executeHermes(cwd, args, logFile) {
       const rawOutput = answer.join("").trim();
       if (timedOut) {
         finish({ status: "stalled", errorMessage: `Timed out after ${Math.round(args.timeoutMs / 1000)}s`, sessionId: acpSessionId, rawOutput });
+      } else if (phase === "done") {
+        // The prompt already returned. Its stopReason is the authoritative
+        // verdict and the awaiting flow is guaranteed to settle, so exiting
+        // promptly after a turn is normal shutdown — not a completion.
+        return;
       } else if (code !== 0) {
         const msg = code === null ? `signal ${signal}` : `exit ${code}`;
         finish({ status: "failed", errorMessage: stderrTail.trim() || msg, sessionId: acpSessionId, rawOutput });
       } else {
-        finish({ status: "completed", sessionId: acpSessionId, rawOutput });
+        // Exit 0 before the prompt returned is an incomplete protocol run, not
+        // a success — the answer never arrived. Without this branch a clean exit
+        // races the stopReason verdict and reports "completed" for cancelled and
+        // refused turns too.
+        finish({
+          status: "failed",
+          errorMessage: `hermes exited during ${phase} without returning a prompt result`,
+          sessionId: acpSessionId,
+          rawOutput,
+        });
       }
     });
 
@@ -342,6 +357,7 @@ function executeHermes(cwd, args, logFile) {
 
         // Resume with session/load when a prior session id is given; fall back to
         // a fresh session if this build doesn't support load.
+        phase = "session";
         if (args.resume) {
           try {
             await rpc("session/load", { sessionId: args.resume, cwd, mcpServers: [] });
@@ -374,10 +390,12 @@ function executeHermes(cwd, args, logFile) {
         // Hermes reads AGENTS.md and the shared .agents/skills tree natively,
         // so it can see cc-suite's Claude-facing skills too. Refuse the hand-back
         // in the prompt. See lib/delegation-boundary.mjs.
+        phase = "prompt";
         const result = await rpc("session/prompt", {
           sessionId: acpSessionId,
           prompt: [{ type: "text", text: withDelegationBoundary(args.prompt) }],
         });
+        phase = "done";
 
         if (timedOut) return; // the deadline path (close handler) finishes as stalled
         // Streamed chunks can trail the prompt response — drain before killing.
@@ -386,9 +404,11 @@ function executeHermes(cwd, args, logFile) {
         const rawOutput = answer.join("").trim();
         const stop = result?.stopReason;
         appendLog(logFile, `Prompt returned (stopReason=${stop || "?"}, ${toolCalls} tool call(s))`);
-        // A cancelled/refused turn is not a successful completion.
+        // A cancelled/refused turn is not a successful completion. The client
+        // (this runner) denying a permission request is a policy decision, not a
+        // hang — reporting `stalled` would conflate it with the deadline.
         if (stop === "cancelled" || stop === "canceled") {
-          finish({ status: "stalled", errorMessage: `hermes stopReason=${stop}`, sessionId: acpSessionId, rawOutput });
+          finish({ status: "blocked", errorMessage: `hermes stopReason=${stop}`, sessionId: acpSessionId, rawOutput });
         } else if (stop === "refusal") {
           finish({ status: "failed", errorMessage: "hermes refused the request (stopReason=refusal)", sessionId: acpSessionId, rawOutput });
         } else if (stop === "max_tokens" || stop === "max_turn_requests") {

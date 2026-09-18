@@ -73,7 +73,7 @@ If no jobs exist: "No jobs recorded yet. Run /audit, /implement, or /bug-analyze
 
 **Job ID**: {id}
 **Kind**: {audit | implement | bug-analyze | review-plan | verify | agy}
-**Status**: {running | completed | failed | cancelled}
+**Status**: {running | completed | failed | stalled | blocked | cancelled}
 **Started**: {ISO timestamp}
 **Elapsed**: {hh:mm:ss}
 **Thread ID**: `{threadId}` _(use `/continue {threadId}` to follow up)_
