@@ -1,0 +1,38 @@
+{
+  "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
+  "name": "huangzigen666",
+  "description": "Local fork of xiaolai/cc-suite, tracking the fork's own releases.",
+  "owner": {
+    "name": "huangzigen666",
+    "url": "https://github.com/huangzigen666"
+  },
+  "plugins": [
+    {
+      "name": "cc-suite",
+      "description": "Fork of cc-suite: bridge and delegate across Claude Code, Codex CLI, Antigravity (agy), Grok Build, CodeBuddy, Hermes, Qoder and Qwen Code. 2.1.1 is a packaging release (this marketplace manifest); 2.1.0 enforced the read-only sandbox for the ACP lanes, reports a client denial as a distinct 'blocked' status instead of 'stalled', and fixed a close-handler race that could report a cancelled or refused turn as completed.",
+      "source": "./",
+      "version": "2.1.1",
+      "author": {
+        "name": "xiaolai"
+      },
+      "repository": "https://github.com/huangzigen666/cc-suite",
+      "license": "ISC",
+      "keywords": [
+        "codex",
+        "gemini",
+        "agy",
+        "grok",
+        "codebuddy",
+        "agents-md",
+        "mcp",
+        "bridge",
+        "delegation",
+        "multi-tool",
+        "audit",
+        "code-review",
+        "fork"
+      ],
+      "category": "developer-tools"
+    }
+  ]
+}
