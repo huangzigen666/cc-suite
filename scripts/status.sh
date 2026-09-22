@@ -189,7 +189,26 @@ PY
     mark ".mcp.json → Claude" miss "(Codex is not enabled — no codex-cli registration expected)"
   else
     case "$_codex_cli_rc" in
-      0) mark ".mcp.json → Claude" ok   "codex-cli registered (codex mcp-server)" ;;
+      0)
+        _probe_script="${CLAUDE_PLUGIN_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}/scripts/codex_mcp_probe.py"
+        _probe_json="$(python3 "$_probe_script" --json 2>/dev/null || true)"
+        _probe_status="$(PROBE_JSON="$_probe_json" python3 - <<'PY'
+import json
+import os
+try:
+    print(json.loads(os.environ.get("PROBE_JSON", "{}")).get("status", "failed"))
+except json.JSONDecodeError:
+    print("failed")
+PY
+)"
+        if [ "$_probe_status" = "healthy" ]; then
+          mark ".mcp.json → Claude" ok "codex-cli registered and MCP handshake passed"
+        elif [ "$_probe_status" = "unsupported" ]; then
+          mark ".mcp.json → Claude" warn "codex-cli entry is incompatible with this Codex; run /cc-suite:repair to remove it (codex exec runner remains available)"
+        else
+          mark ".mcp.json → Claude" warn "codex-cli registered but MCP handshake failed; run /cc-suite:diagnose"
+        fi
+        ;;
       1) mark ".mcp.json → Claude" warn "codex-cli stale (legacy npm registration) — run /cc-suite:repair" ;;
       4) mark ".mcp.json → Claude" warn "codex-cli noncanonical (custom registration) — review, or run /cc-suite:repair to restore the canonical form" ;;
       2) mark ".mcp.json → Claude" miss "codex-cli not registered (run /cc-suite:init step 8)" ;;

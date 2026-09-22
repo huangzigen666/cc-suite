@@ -188,7 +188,7 @@ each artifact if already correct.
 bash "${PLUGIN_ROOT}/scripts/bridge_skills.sh"
 ```
 
-### Step 8: Register codex-cli MCP server
+### Step 8: Probe and register the optional codex-cli MCP server
 
 ```bash
 bash "${PLUGIN_ROOT}/scripts/mcp_codex.sh"
@@ -216,7 +216,7 @@ Report:
 cc-suite initialized
 
 Bridge artifacts: {status summary}
-Claude → Codex:  .mcp.json has codex-cli registered ✓
+Claude → Codex:  codex exec runner available; direct codex-cli MCP is shown only when its initialize handshake passes ✓
 Codex → Claude:  .codex/config.toml has claude-code registered ✓
 agy → Claude:    .agents/mcp_config.json has claude-code when the projection is available ✓
 Project config:  .cc-suite.md written ({focus}, {depth}, effort={effort})

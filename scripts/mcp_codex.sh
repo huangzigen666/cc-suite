@@ -1,15 +1,75 @@
 #!/usr/bin/env bash
 # cc-suite: register the codex-cli MCP server in .mcp.json (idempotent merge).
 #
-# The codex-cli MCP server is the Codex CLI's own built-in MCP server, started
-# with `codex mcp-server`. It requires the `codex` binary on PATH (listed as a
-# prerequisite in AGENTS.md). No npm package is installed.
+# The codex-cli MCP server is an optional direct surface. Codex CLI releases
+# can remove or repurpose its `mcp-server` subcommand, so we probe the actual
+# stdio/MCP handshake before registering it. Claude -> Codex delegation still
+# uses the deadline-bounded `codex exec` runner when this optional surface is
+# unavailable. No npm package is installed.
 #
 # Idempotent: a missing entry is added, a stale entry (e.g. an older npm-based
 # registration) is migrated to the canonical definition, and an already-correct
 # entry is left untouched.
 
 set -euo pipefail
+
+# A valid-looking .mcp.json entry is not enough: Claude reports only the
+# unhelpful CONNECTION_CLOSED error when the child exits before MCP initialize.
+# Keep the probe in one place so init/repair and diagnose agree on reality.
+# The integration suite sets this only for schema/idempotency fixtures, where
+# no real Codex binary is part of the test contract.
+if [ "${CC_SUITE_SKIP_CODEX_MCP_PROBE:-0}" != "1" ]; then
+  _probe_json="$(python3 "$(dirname "${BASH_SOURCE[0]}")/codex_mcp_probe.py" --json 2>/dev/null || true)"
+  _probe_status="$(PROBE_JSON="$_probe_json" python3 - <<'PY'
+import json
+import os
+try:
+    print(json.loads(os.environ.get("PROBE_JSON", "{}")).get("status", "failed"))
+except json.JSONDecodeError:
+    print("failed")
+PY
+  )"
+  if [ "$_probe_status" != "healthy" ]; then
+    if [ "$_probe_status" != "unsupported" ]; then
+      printf '! codex-cli MCP probe failed (%s); inspect Codex before changing .mcp.json\n' "$_probe_status" >&2
+      exit 1
+    fi
+    python3 - <<'PY'
+import json
+import os
+import tempfile
+from pathlib import Path
+
+p = Path(".mcp.json")
+if not p.exists():
+    raise SystemExit(0)
+try:
+    data = json.loads(p.read_text(encoding="utf-8"))
+except (OSError, json.JSONDecodeError):
+    raise SystemExit(2)
+servers = data.get("mcpServers") if isinstance(data, dict) else None
+if not isinstance(data, dict) or (servers is not None and not isinstance(servers, dict)):
+    raise SystemExit(2)
+if not isinstance(servers, dict) or "codex-cli" not in servers:
+    raise SystemExit(0)
+del servers["codex-cli"]
+fd, tmp_name = tempfile.mkstemp(dir=str(p.parent), prefix=f".{p.name}.", suffix=".tmp")
+try:
+    os.fchmod(fd, p.stat().st_mode & 0o7777)
+    with os.fdopen(fd, "w", encoding="utf-8") as tmp_file:
+        tmp_file.write(json.dumps(data, indent=2) + "\n")
+    os.replace(tmp_name, p)
+except BaseException:
+    try:
+        os.unlink(tmp_name)
+    except OSError:
+        pass
+    raise
+PY
+    printf '! codex-cli direct MCP disabled (%s); Claude -> Codex uses the codex exec runner\n' "$_probe_status" >&2
+    exit 0
+  fi
+fi
 
 # Creation and merge share one implementation and one CANONICAL object: a
 # second spelling of the server definition is how the two paths drift apart.

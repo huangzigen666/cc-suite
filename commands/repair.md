@@ -31,7 +31,10 @@ bash "${CLAUDE_PLUGIN_ROOT}/scripts/bridge_skills.sh"
 
 ### Step 3: Register codex-cli MCP server
 
-Adds `codex-cli` to `.mcp.json` so Claude can invoke Codex as a tool.
+Runs the handshake-guarded registration for the optional direct `codex-cli`
+MCP tool. When the installed Codex no longer exposes `codex mcp-server`, the
+script removes only the stale cc-suite-owned entry and leaves the supported
+deadline-bounded `codex exec` delegation path in place.
 
 ```bash
 bash "${CLAUDE_PLUGIN_ROOT}/scripts/mcp_codex.sh"

@@ -32,9 +32,9 @@ GITIGNORE_FILE=".gitignore"
 PRIVATE="${PRIVATE:-0}"
 
 # A publishable plugin repo ships its root files to every installer, and Claude
-# Code auto-registers a plugin-root .mcp.json — starting `codex mcp-server` for
-# everyone who installs the plugin. The codex-cli registration is a dev-only
-# delegation aid, so in a plugin repo it must stay out of the published tree
+# Code auto-registers a plugin-root .mcp.json — the optional codex-cli direct
+# surface is handshake-checked before it is written. The codex-cli registration
+# is a dev-only delegation aid, so in a plugin repo it must stay out of the published tree
 # even in public mode (in private mode the whole bridge is already ignored).
 IS_PLUGIN_REPO=0
 if [ -f ".claude-plugin/plugin.json" ] || [ -f ".codex-plugin/plugin.json" ]; then
@@ -235,7 +235,7 @@ GI
     echo "$MCP_IGNORE_MARKER"
     cat <<'GI'
 # published plugin. Claude Code auto-registers a plugin-root .mcp.json, which
-# would start `codex mcp-server` for every installer. Local dev use is fine;
+# would start the optional direct Codex MCP surface for every installer. Local dev use is fine;
 # the file just stays untracked.
 .mcp.json
 GI

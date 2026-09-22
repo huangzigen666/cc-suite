@@ -63,6 +63,7 @@ CLAUDE_SENTINEL_CLOSE = "<<< cc-suite-claude-mcp <<<"
 MCP_SENTINEL_OPEN = "# >>> cc-suite-mcp >>>"
 MCP_SENTINEL_CLOSE = "# <<< cc-suite-mcp <<<"
 CODEX_CANONICAL = {"type": "stdio", "command": "codex", "args": ["mcp-server"]}
+CODEX_MCP_PROBE = SCRIPT_DIR / "codex_mcp_probe.py"
 
 
 def check(cid: str, label: str, status: str, detail: str,
@@ -82,6 +83,33 @@ def script(name: str) -> str:
     # shlex.quote: these strings are executed by the wrapper's shell — a path
     # containing quotes/backticks/$() must never become shell-active.
     return shlex.quote(str(PLUGIN_ROOT / "scripts" / name))
+
+
+def probe_codex_mcp() -> dict[str, object]:
+    """Run the same initialize handshake used before registration.
+
+    A failed probe is data, not a diagnostic crash: diagnose must still report
+    the rest of the bridge when Codex is missing, upgraded, or temporarily
+    unable to start.
+    """
+    try:
+        result = subprocess.run(
+            [sys.executable, str(CODEX_MCP_PROBE), "--json"],
+            cwd=ROOT,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=8,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return {"status": "failed", "reason": f"probe could not run: {exc}"}
+    try:
+        value = json.loads(result.stdout.strip() or "{}")
+    except json.JSONDecodeError:
+        return {"status": "failed", "reason": "probe returned invalid JSON"}
+    return value if isinstance(value, dict) else {"status": "failed", "reason": "probe returned a non-object"}
 
 
 def _read(path: Path) -> str | None:
@@ -386,8 +414,33 @@ def check_mcp_codex_cli(enabled: list[str]) -> dict:
     servers = doc.get("mcpServers")
     entry = servers.get("codex-cli") if isinstance(servers, dict) else None
     if entry == CODEX_CANONICAL:
-        return check("mcp_codex_cli", ".mcp.json → codex-cli", "healthy", "codex mcp-server registered")
+        probe = probe_codex_mcp()
+        status = probe.get("status")
+        if status == "healthy":
+            return check("mcp_codex_cli", ".mcp.json → codex-cli", "healthy",
+                         "codex mcp-server registered and answered MCP initialize")
+        if status == "unsupported":
+            return check(
+                "mcp_codex_cli", ".mcp.json → codex-cli", "issue",
+                f"codex-cli registration is incompatible with the installed Codex"
+                f" ({probe.get('version') or 'version unknown'}): {probe.get('reason')};"
+                " use the deadline-bounded codex exec runner instead",
+                auto=[f"bash {script('mcp_codex.sh')}", f"bash {script('bridge_mcp.sh')}"],
+                restart_required=True,
+            )
+        return check(
+            "mcp_codex_cli", ".mcp.json → codex-cli", "issue",
+            f"codex-cli registration did not complete an MCP handshake: {probe.get('reason', 'unknown probe failure')}",
+            manual="run the Codex MCP probe, then inspect the installed Codex CLI before retrying",
+        )
     if entry is None:
+        probe = probe_codex_mcp()
+        if probe.get("status") == "unsupported":
+            return check(
+                "mcp_codex_cli", ".mcp.json → codex-cli", "info",
+                "direct codex-cli MCP is unavailable in the installed Codex;"
+                " Claude → Codex uses the deadline-bounded codex exec runner",
+            )
         return check("mcp_codex_cli", ".mcp.json → codex-cli", "issue", "codex-cli not registered",
                      auto=[f"bash {script('mcp_codex.sh')}", f"bash {script('bridge_mcp.sh')}"],
                      restart_required=True)

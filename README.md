@@ -342,7 +342,7 @@ Claude Code ──── codex-cli MCP ────►  Codex CLI
                                    implement, debug)
 ```
 
-The Codex→Claude path delivers `claude-octopus` via `npx -y` at runtime — no pre-install. The Claude→Codex path uses the Codex CLI's own built-in MCP server (`codex mcp-server`), so it needs the `codex` binary on PATH. Each side reuses its host CLI's existing login — no separate credentials.
+The Codex→Claude path delivers `claude-octopus` via `npx -y` at runtime — no pre-install. The primary Claude→Codex path uses the deadline-bounded `codex exec` runner. cc-suite also probes and registers the optional direct `codex-cli` MCP surface when the installed Codex answers `codex mcp-server`; newer Codex releases may repurpose that subcommand, in which case the entry is omitted instead of leaving Claude with a `CONNECTION_CLOSED` server. Each side reuses its host CLI's existing login — no separate credentials.
 
 ## Bridge table
 
@@ -352,7 +352,7 @@ The Codex→Claude path delivers `claude-octopus` via `npx -y` at runtime — no
 | Skills | `.agents/skills/ → ../.claude/skills/` symlink (Codex + agy workspace skills) |
 | Hooks | `.claude/settings.json` (5 shared events) → `.codex/hooks.json` |
 | MCP parity | `.mcp.json` entries → `.codex/config.toml [mcp_servers.*]` + `.agents/mcp_config.json` |
-| Codex MCP | `codex-cli` entry in `.mcp.json` (via `mcp_codex.sh`) |
+| Codex MCP | Optional, handshake-verified `codex-cli` entry in `.mcp.json` (via `mcp_codex.sh`); the `codex exec` runner remains the supported delegation path |
 | Claude MCP | `claude-code` entry in `.codex/config.toml` (via `mcp_claude.sh`) and `.agents/mcp_config.json` (via `bridge_mcp.sh`) |
 
 **Not bridged:**

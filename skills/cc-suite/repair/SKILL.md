@@ -54,7 +54,10 @@ Links plugin skills into `.claude/skills/cc-suite/` and ensures `.agents/skills 
 bash "${PLUGIN_ROOT}/scripts/mcp_codex.sh"
 ```
 
-Adds `codex-cli` to `.mcp.json` so Claude can invoke Codex as a tool.
+Runs the handshake-guarded registration for the optional direct `codex-cli`
+MCP tool. If the installed Codex no longer exposes `codex mcp-server`, the
+script removes only the stale cc-suite-owned entry; Claude → Codex continues
+through the deadline-bounded `codex exec` runner.
 
 ### Step 4: Register claude-code MCP server
 

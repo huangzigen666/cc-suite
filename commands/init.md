@@ -308,7 +308,11 @@ Step 5b.** Say so in the summary rather than silently omitting it. `bridge_mcp.s
 below also writes the Antigravity projection — run it if *either* Codex or
 Antigravity was selected, and skip it only when neither was.
 
-Add the `codex-cli` MCP server to `.mcp.json` so Claude can invoke Codex as an MCP tool:
+Ask `mcp_codex.sh` to register the optional direct `codex-cli` MCP surface. The
+script first performs an MCP `initialize` handshake against the installed
+Codex. If that release no longer exposes `codex mcp-server`, it removes only a
+previous cc-suite-owned entry and reports that the supported Claude → Codex
+path is the deadline-bounded `codex exec` runner:
 
 ```bash
 bash "${CLAUDE_PLUGIN_ROOT}/scripts/mcp_codex.sh"
@@ -400,7 +404,7 @@ Display a combined status report:
 
 {include only the lines for tools that were actually bridged}
 
-- **Claude → Codex**: `.mcp.json` has `codex-cli` registered ✓
+- **Claude → Codex**: `codex exec` runner is available; `.mcp.json` may also have a handshake-verified `codex-cli` entry ✓
 - **Codex → Claude**: `.codex/config.toml` has `claude-code` registered ✓
 - **agy → Claude**: `.agents/mcp_config.json` has the generated `claude-code` entry when the agy projection is available ✓
 

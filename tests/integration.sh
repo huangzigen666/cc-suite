@@ -581,7 +581,7 @@ cat > .mcp.json <<'JSON'
 {"mcpServers": {"other": {"type": "stdio", "command": "cmd"}}}
 JSON
 
-assert_exit0 bash "$SCRIPTS/mcp_codex.sh"
+assert_exit0 env CC_SUITE_SKIP_CODEX_MCP_PROBE=1 bash "$SCRIPTS/mcp_codex.sh"
 
 assert_contains ".mcp.json" '"codex-cli"'
 assert_contains ".mcp.json" '"other"'    # original preserved
@@ -599,7 +599,7 @@ cat > .mcp.json <<'JSON'
 JSON
 hash1="$(md5 -q .mcp.json 2>/dev/null || md5sum .mcp.json | awk '{print $1}')"
 
-assert_exit0 bash "$SCRIPTS/mcp_codex.sh"
+assert_exit0 env CC_SUITE_SKIP_CODEX_MCP_PROBE=1 bash "$SCRIPTS/mcp_codex.sh"
 hash2="$(md5 -q .mcp.json 2>/dev/null || md5sum .mcp.json | awk '{print $1}')"
 
 if [ "$hash1" = "$hash2" ]; then ok_msg ".mcp.json unchanged on re-run"
@@ -617,7 +617,7 @@ cat > .mcp.json <<'JSON'
 {"mcpServers": {"codex-cli": {"type": "stdio", "command": "npx", "args": ["-y", "codex-mcp-server@1.4.10"]}, "keep": {"type": "stdio", "command": "cmd"}}}
 JSON
 
-assert_exit0 bash "$SCRIPTS/mcp_codex.sh"
+assert_exit0 env CC_SUITE_SKIP_CODEX_MCP_PROBE=1 bash "$SCRIPTS/mcp_codex.sh"
 
 assert_contains     ".mcp.json" '"mcp-server"'      # migrated to the built-in server
 assert_not_contains ".mcp.json" 'codex-mcp-server'  # stale npm reference removed
@@ -2473,13 +2473,26 @@ cleanup
 section "T76c: diagnose.py — initialized project is healthy on the hermetic checks"
 make_tmp
 printf '# X\n' > AGENTS.md
+mkdir -p bin
+cat > bin/codex <<'CODEX'
+#!/usr/bin/env bash
+if [ "$1" = "--version" ]; then
+  echo "codex-cli 0.155.1-test"
+elif [ "$1" = "mcp-server" ]; then
+  IFS= read -r _request
+  printf '%s\n' '{"jsonrpc":"2.0","id":1,"result":{"capabilities":{}}}'
+else
+  exit 1
+fi
+CODEX
+chmod +x bin/codex
 bash "$SCRIPTS/init.sh"          >/dev/null 2>&1
 bash "$SCRIPTS/bridge_skills.sh" >/dev/null 2>&1
-bash "$SCRIPTS/mcp_codex.sh"     >/dev/null 2>&1
+PATH="$TMP/bin:$PATH" bash "$SCRIPTS/mcp_codex.sh"     >/dev/null 2>&1
 bash "$SCRIPTS/mcp_claude.sh"    >/dev/null 2>&1
 bash "$SCRIPTS/bridge_mcp.sh"    >/dev/null 2>&1
 printf '## Enabled Tools\n- [x] claude\n- [x] codex\n- [x] antigravity\n\n## Defaults\n\n- **Default model**: latest\n' > .cc-suite.md
-mkdir -p "$TMP/fakehome"; HOME="$TMP/fakehome" python3 "$SCRIPTS/diagnose.py" --json --no-preflight > diag.json 2>/dev/null || true
+mkdir -p "$TMP/fakehome"; HOME="$TMP/fakehome" PATH="$TMP/bin:$PATH" python3 "$SCRIPTS/diagnose.py" --json --no-preflight > diag.json 2>/dev/null || true
 python3 - <<'PY' && ok_msg "initialized project: bridge checks healthy, latest policy healthy" || fail_msg "initialized-project assertions failed"
 import json
 d = json.load(open("diag.json"))
@@ -2489,6 +2502,30 @@ for cid in ("agents_md", "claude_md", "claude_skills_link", "agents_skills_link"
     assert checks[cid]["status"] == "healthy", f"{cid}: {checks[cid]['status']} — {checks[cid]['detail']}"
 assert d["summary"].get("issue", 0) == 0, d["summary"]
 PY
+cleanup
+
+section "T76c2: mcp_codex.sh — removes an incompatible direct MCP entry"
+make_tmp
+mkdir -p bin
+cat > bin/codex <<'CODEX'
+#!/usr/bin/env bash
+if [ "$1" = "--version" ]; then
+  echo "codex-cli 0.155.1-test"
+elif [ "$1" = "mcp-server" ]; then
+  echo "Error: stdin is not a terminal" >&2
+  exit 1
+else
+  exit 1
+fi
+CODEX
+chmod +x bin/codex
+cat > .mcp.json <<'JSON'
+{"mcpServers":{"codex-cli":{"type":"stdio","command":"codex","args":["mcp-server"]},"keep":{"type":"stdio","command":"keep"}}}
+JSON
+PATH="$TMP/bin:$PATH" bash "$SCRIPTS/mcp_codex.sh" >/dev/null 2>stderr.log
+assert_not_contains ".mcp.json" '"codex-cli"'
+assert_contains ".mcp.json" '"keep"'
+assert_contains "stderr.log" "direct MCP disabled"
 cleanup
 
 section "T76d: diagnose.py — malformed model field is informational, stale advisor parity is an issue"
