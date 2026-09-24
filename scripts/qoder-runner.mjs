@@ -109,7 +109,7 @@ function buildQoderArgs(args, cwd) {
   a.push("--permission-mode", mode);
   a.push("--cwd", cwd);
   if (args.resume) a.push("--resume", args.resume);
-  a.push("--", args.prompt);
+  a.push("--", withDelegationBoundary(args.prompt));
   return a;
 }
 

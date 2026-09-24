@@ -18,7 +18,8 @@ const RUNNER = fileURLToPath(
 // Newlines are built with String.fromCharCode(10) so this template needs no
 // escape sequences at all.
 //
-//   FAKE_QODER_MODE        result | answer-only | result-error   (default result)
+//   FAKE_QODER_MODE        result | answer-only | result-error | echo-prompt
+//                          (default result; echo-prompt returns the prompt argv)
 //   FAKE_QODER_EXIT_CODE   exit with this code                   (default 0)
 //   FAKE_QODER_EXIT_AFTER  exit this long after emitting         (default 10ms)
 const FAKE_AGENT = `#!/usr/bin/env node
@@ -31,6 +32,8 @@ if (mode === "result") {
   out({ type: "result", subtype: "success", session_id: SID, result: "FINAL RESULT" });
 } else if (mode === "result-error") {
   out({ type: "result", subtype: "error", session_id: SID, result: "SOMETHING FAILED" });
+} else if (mode === "echo-prompt") {
+  out({ type: "result", subtype: "success", session_id: SID, result: process.argv[process.argv.length - 1] });
 }
 setTimeout(
   () => process.exit(Number(process.env.FAKE_QODER_EXIT_CODE || "0")),
@@ -123,4 +126,13 @@ test("a terminal error subtype is a failure even with a clean exit", () => {
   assert.ok(parsed, JSON.stringify(parsed));
   assert.equal(parsed.status, "failed", JSON.stringify(parsed));
   assert.match(failureText(parsed), /SOMETHING FAILED/);
+});
+
+test("the prompt handed to qoder carries the delegation boundary", () => {
+  // Regression: the runner imported withDelegationBoundary but passed the raw
+  // prompt, so Qoder — which reads the shared skills tree — got no boundary.
+  const { parsed } = runQoder({ FAKE_QODER_MODE: "echo-prompt" });
+  assert.ok(parsed, JSON.stringify(parsed));
+  assert.equal(parsed.status, "completed", JSON.stringify(parsed));
+  assert.match(parsed.rawOutput, /^This request already reached you by delegation from Claude Code\.[\s\S]*hello$/);
 });
