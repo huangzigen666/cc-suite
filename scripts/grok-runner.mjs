@@ -687,7 +687,6 @@ function runBackground(cwd, args) {
 }
 
 async function runBackgroundWorker(cwd, args, jobId) {
-  const logFile = createJobLogFile(cwd, jobId);
   // Claim the queued job atomically — see codex-runner for the rationale.
   const claimed = claimJob(cwd, jobId, {
     status: "running", pid: process.pid,
@@ -695,10 +694,11 @@ async function runBackgroundWorker(cwd, args, jobId) {
     startedAt: new Date().toISOString(),
     deadlineAt: new Date(Date.now() + args.timeoutMs).toISOString(),
   });
-  if (!claimed) {
-    appendLog(logFile, "Background worker exiting — job was cancelled before startup");
-    return;
-  }
+  // Claim before touching the log: a job removed or cancelled before this
+  // worker started (SessionEnd drops queued records and their logs) must not
+  // get its log recreated as an orphan no state record points to.
+  if (!claimed) return;
+  const logFile = createJobLogFile(cwd, jobId);
   appendLog(logFile, "Background worker started (backend=grok/ACP)");
 
   const result = await executeGrok(cwd, args, logFile);

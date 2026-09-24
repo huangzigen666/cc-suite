@@ -1001,7 +1001,6 @@ function runBackground(cwd, args) {
 
 async function runBackgroundWorker(cwd, args, jobId) {
   const jobContext = { cwd, jobId };
-  const logFile = createJobLogFile(cwd, jobId);
   const sourceTargets = snapshotReviewTargets(cwd, args.targets);
   // Claim the queued job atomically — SessionEnd can cancel it in the gap
   // between queueing and worker startup, and resurrecting it to running would
@@ -1014,10 +1013,11 @@ async function runBackgroundWorker(cwd, args, jobId) {
     startedAt: new Date().toISOString(),
     deadlineAt: new Date(Date.now() + args.timeoutMs).toISOString(),
   });
-  if (!claimed) {
-    appendLog(logFile, "Background worker exiting — job was cancelled before startup");
-    return;
-  }
+  // Claim before touching the log: a job removed or cancelled before this
+  // worker started (SessionEnd drops queued records and their logs) must not
+  // get its log recreated as an orphan no state record points to.
+  if (!claimed) return;
+  const logFile = createJobLogFile(cwd, jobId);
   ACTIVE_JOB_CONTEXTS.add(jobContext);
   try {
     let result;
