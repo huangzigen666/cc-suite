@@ -10,7 +10,7 @@
 #   delegate <backend> [runner-flags...] -- <prompt>
 #   delegate <backend> <prompt words...>
 #
-# Backends: codex, agy, grok, qwen, codebuddy, qoder, hermes, zcode, doubao
+# Backends: codex, agy, grok, qwen, codebuddy, qoder, hermes, zcode, doubao, mimo
 #
 # Examples:
 #   delegate codex "refactor src/foo.ts"
@@ -25,7 +25,7 @@ set -e
 backend="${1:-}"
 if [ -z "$backend" ] || [ "$backend" = "-h" ] || [ "$backend" = "--help" ]; then
   echo "Usage: delegate <backend> [runner-flags...] -- <prompt>" >&2
-  echo "Backends: codex, agy, grok, qwen, codebuddy, qoder, hermes, zcode, doubao" >&2
+  echo "Backends: codex, agy, grok, qwen, codebuddy, qoder, hermes, zcode, doubao, mimo" >&2
   exit 2
 fi
 shift
@@ -56,7 +56,7 @@ runner="${scripts:-/nonexistent}/${backend}-runner.mjs"
 if [ ! -f "$runner" ]; then
   echo "delegate: unknown backend '$backend'" >&2
   echo "  looked in: ${scripts:-<not found>}" >&2
-  echo "  backends: codex, agy, grok, qwen, codebuddy, qoder, hermes, zcode, doubao" >&2
+  echo "  backends: codex, agy, grok, qwen, codebuddy, qoder, hermes, zcode, doubao, mimo" >&2
   exit 2
 fi
 

@@ -1,5 +1,5 @@
 ---
-description: Route a prompt to any cc-suite backend (codex, agy, grok, qwen, codebuddy, qoder, hermes, zcode, doubao) through the universal delegator, with bounded execution and shared job tracking. The Claude → any-agent delegation lane.
+description: Route a prompt to any cc-suite backend (codex, agy, grok, qwen, codebuddy, qoder, hermes, zcode, doubao, mimo) through the universal delegator, with bounded execution and shared job tracking. The Claude → any-agent delegation lane.
 argument-hint: "<backend> [--model <id>] [--effort <level>] [--sandbox read-only|workspace-write|danger-full-access] [--background] [--resume <session-id>] [--] <prompt>"
 allowed-tools:
   - Bash
@@ -10,8 +10,8 @@ allowed-tools:
 
 Send a prompt to **any** backend in the cc-suite grid through the universal
 delegator. This is the single Claude-facing surface for the whole agent mesh:
-`codex`, `agy`, `grok`, `qwen`, `codebuddy`, `qoder`, `hermes`, `zcode`, and
-`doubao`. The first
+`codex`, `agy`, `grok`, `qwen`, `codebuddy`, `qoder`, `hermes`, `zcode`,
+`doubao`, and `mimo`. The first
 word of the request selects the backend; the rest is forwarded to that
 backend's runner unchanged.
 
@@ -41,7 +41,7 @@ $ARGUMENTS
 The first whitespace-delimited token is the **backend**. It must be one of:
 
 ```
-codex   agy   grok   qwen   codebuddy   qoder   hermes   zcode   doubao
+codex   agy   grok   qwen   codebuddy   qoder   hermes   zcode   doubao   mimo
 ```
 
 Strip a single leading `--` separator if present, then extract these optional
@@ -79,8 +79,9 @@ so it's cheap. If `status` is `"ok"`, continue.
 
 The chosen `--sandbox` level is mapped by the selected backend's runner onto its
 native enforcement (ACP client-side fs/permission callbacks for CodeBuddy and
-Hermes; `--permission-mode` for Qoder; `--mode plan|edit|yolo` for ZCode; the
-backend default otherwise). Doubao is a chat assistant with no workspace
+Hermes; `--permission-mode` for Qoder; `--mode plan|edit|yolo` for ZCode;
+`MIMOCODE_PERMISSION` rules for MiMo, where read-only removes every write and
+shell tool; the backend default otherwise). Doubao is a chat assistant with no workspace
 access, so every level behaves the same there — only the prompt text leaves the
 machine. The mapping is handled inside the runner — you only pick the level:
 
@@ -119,7 +120,10 @@ in ZCode.app and needs a Z.AI login (sign in inside the app); `doubao` needs
 the `doubao` CLI (`npm i -g doubao-cli`) and a running Doubao.app with CDP
 enabled (`doubao cdp launch`, which restarts the app). `zcode` ignores
 `--model`/`--effort`; `doubao` forwards them as `--model`/`--reasoning`, and
-its `threadId` is a Doubao conversation id. If the runner returns a
+its `threadId` is a Doubao conversation id; `mimo` defaults to
+`deepseek/deepseek-flash` (override with `--model provider/model` or
+`MIMO_MODEL`; `xiaomi/*` models need `mimo providers login`) and forwards
+`--effort` as `--variant`. If the runner returns a
 `failed` job naming such a prerequisite, surface it verbatim.
 
 ### Step 5: Report
