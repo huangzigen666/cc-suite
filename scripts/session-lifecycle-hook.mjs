@@ -6,7 +6,7 @@ import process from "node:process";
 import { spawnSync } from "node:child_process";
 
 import { readHookInput } from "./lib/hook-input.mjs";
-import { verifyJobProcess } from "./lib/job-control.mjs";
+import { TERM_CONFIRM_MS, verifyJobProcess } from "./lib/job-control.mjs";
 import { terminateProcessTree, waitForExit } from "./lib/process.mjs";
 import {
   isActiveJob,
@@ -20,8 +20,9 @@ export const SESSION_ID_ENV = "CODEX_TOOLKIT_SESSION_ID";
 const PLUGIN_DATA_ENV = "CLAUDE_PLUGIN_DATA";
 
 // SessionEnd runs on the user's exit path, so the whole confirmation budget is
-// bounded and shared across jobs rather than paid per job.
-const TERM_CONFIRM_MS = 1500;
+// bounded and shared across jobs rather than paid per job. The TERM budget is
+// job-control's, not a local copy: it must outlast a runner's own tree cleanup,
+// or escalating to SIGKILL on the runner leaves its backend group alive.
 const KILL_CONFIRM_MS = 500;
 
 function shellEscape(value) {
@@ -43,6 +44,18 @@ function cleanupSessionJobs(cwd, sessionId) {
   const workspaceRoot = resolveWorkspaceRoot(cwd);
   const stateFile = resolveStateFile(workspaceRoot);
   if (!fs.existsSync(stateFile)) return;
+
+  // Phase 0 — drop still-queued jobs atomically, under the lock. A queued job
+  // has no process yet; removing its record makes its worker's claimJob refuse,
+  // so no backend ever starts. Snapshotting it and signalling "no pid" instead
+  // let a worker claim it in between and run a backend nobody signalled.
+  // Jobs claimed before this point are `running` with a pid and are handled by
+  // the phases below from the fresh snapshot taken after this.
+  updateState(workspaceRoot, (state) => {
+    state.jobs = state.jobs.filter(
+      (j) => !(j.sessionId === sessionId && j.status === "queued")
+    );
+  });
 
   const sessionJobs = loadState(workspaceRoot).jobs.filter(
     (j) => j.sessionId === sessionId
@@ -153,6 +166,10 @@ function cleanupSessionJobs(cwd, sessionId) {
               ...j,
               status: "cancelled",
               errorMessage: retainedNotes.get(j.id),
+              // Retained because its exit could not be confirmed. Without this
+              // flag the next SessionEnd treats it as a finished job and drops
+              // the record without re-checking the process.
+              terminationConfirmed: false,
               updatedAt: timestamp,
             }
           : j

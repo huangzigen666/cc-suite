@@ -17,8 +17,12 @@ import {
 } from "./process.mjs";
 import { resolveWorkspaceRoot } from "./workspace.mjs";
 
-// Grace periods for confirming a signalled job actually exited.
-const TERM_CONFIRM_MS = 1500;
+// Grace periods for confirming a signalled job actually exited. TERM_CONFIRM_MS
+// must comfortably exceed a runner's own cleanup (runner-lifecycle's
+// KILL_GRACE_MS plus its `ps` polls, which slow down under load): escalating
+// to SIGKILL on the runner mid-cleanup would leave a SIGTERM-resistant backend
+// tree alive.
+export const TERM_CONFIRM_MS = 3000;
 const KILL_CONFIRM_MS = 500;
 
 export const SESSION_ID_ENV = "CODEX_TOOLKIT_SESSION_ID";
@@ -326,7 +330,50 @@ export function terminateJobProcess(job) {
 // rather than claiming success, and SessionEnd uses it to decide whether the
 // record may be dropped: deleting a job whose process still runs would hide it.
 export function cancelJob(cwd, reference) {
-  const { workspaceRoot, job } = resolveCancelableJob(cwd, reference);
+  const resolved = resolveCancelableJob(cwd, reference);
+  const { workspaceRoot } = resolved;
+  let job = resolved.job;
+
+  // A queued job has no process yet. Cancel it atomically while it is still
+  // queued: its worker's claimJob then refuses it and the backend never
+  // starts. Snapshotting it and signalling "no pid" instead left a window in
+  // which the worker claimed the job and started a backend nobody signalled.
+  if (job.status === "queued" && !job.pid) {
+    let claimed = null;
+    let raced = null;
+    const timestamp = new Date().toISOString();
+    updateState(workspaceRoot, (state) => {
+      const idx = state.jobs.findIndex((j) => j.id === job.id);
+      if (idx === -1) {
+        raced = "the job record disappeared while the cancel was in flight";
+        return;
+      }
+      const current = state.jobs[idx];
+      if (!isActiveJob(current)) {
+        raced = `the job finished on its own (${current.status}) before the cancel was recorded`;
+        return;
+      }
+      if (current.status === "queued") {
+        state.jobs[idx] = {
+          ...current,
+          status: "cancelled",
+          terminationConfirmed: true,
+          completedAt: timestamp,
+          updatedAt: timestamp,
+        };
+        return;
+      }
+      claimed = current; // the worker got there first; terminate its process
+    });
+    if (raced) {
+      return { workspaceRoot, job, outcome: "already-finished", terminated: true, detail: raced };
+    }
+    if (!claimed) {
+      return { workspaceRoot, job, outcome: "terminated", terminated: true, detail: "the job was cancelled before its worker started" };
+    }
+    job = claimed;
+  }
+
   const result = terminateJobProcess(job);
   const timestamp = new Date().toISOString();
 

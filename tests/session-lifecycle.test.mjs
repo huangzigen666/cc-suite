@@ -6,7 +6,9 @@ import test, { before, after } from "node:test";
 import assert from "node:assert/strict";
 
 import { makeTempDir, cleanupDir, isolateEnv } from "./helpers.mjs";
-import { listJobs, upsertJob } from "../scripts/lib/state.mjs";
+import { claimJob, listJobs, upsertJob } from "../scripts/lib/state.mjs";
+import { TERM_CONFIRM_MS } from "../scripts/lib/job-control.mjs";
+import { KILL_GRACE_MS } from "../scripts/lib/runner-lifecycle.mjs";
 
 const HOOK = fileURLToPath(
   new URL("../scripts/session-lifecycle-hook.mjs", import.meta.url)
@@ -93,7 +95,34 @@ test("SessionEnd drops an active job whose process is already gone", () => {
   }
 });
 
-test("SessionEnd retains a queued job with no PID and marks it cancelled", () => {
+test("a job retained because its exit is unconfirmed survives the next SessionEnd too", () => {
+  const workspace = makeTempDir();
+  try {
+    // A live pid without pidStartedAt is unverifiable: the hook cannot prove
+    // the process is ours, so it must neither signal it nor drop its record.
+    upsertJob(workspace, {
+      id: "unverifiable-1",
+      kind: "audit",
+      status: "running",
+      sessionId: "sess-b",
+      pid: process.pid,
+    });
+    assert.equal(runSessionEnd(workspace, "sess-b").status, 0);
+    let job = listJobs(workspace).find((j) => j.id === "unverifiable-1");
+    assert.equal(job.status, "cancelled");
+    assert.equal(job.terminationConfirmed, false, "retained job must be flagged for re-checking");
+
+    // Regression: without the flag the second SessionEnd treated the record as
+    // an ordinary finished job and dropped it while the process still ran.
+    assert.equal(runSessionEnd(workspace, "sess-b").status, 0);
+    job = listJobs(workspace).find((j) => j.id === "unverifiable-1");
+    assert.ok(job, "a possibly-live job must not disappear on the next SessionEnd");
+  } finally {
+    cleanupDir(workspace);
+  }
+});
+
+test("SessionEnd drops a queued job atomically so its worker never starts a backend", () => {
   const workspace = makeTempDir();
   try {
     upsertJob(workspace, {
@@ -104,9 +133,39 @@ test("SessionEnd retains a queued job with no PID and marks it cancelled", () =>
     });
     const result = runSessionEnd(workspace, "sess-a");
     assert.equal(result.status, 0, result.stderr);
+    assert.equal(listJobs(workspace).length, 0, "a never-started job leaves no stale record");
+    // Regression: the hook snapshotted the queued job, signalled "no pid", and a
+    // worker claiming it in between started a backend nobody terminated. With
+    // the record gone the claim is refused and the backend never starts.
+    assert.equal(claimJob(workspace, "queued-1", { status: "running" }), false);
+  } finally {
+    cleanupDir(workspace);
+  }
+});
+
+test("SessionEnd waits long enough for a runner to finish its own tree cleanup", () => {
+  // Escalating to SIGKILL on a runner mid-cleanup leaves its backend group
+  // alive, so the hook uses job-control's budget instead of a shorter copy.
+  const source = fs.readFileSync(HOOK, "utf8");
+  assert.doesNotMatch(source, /const\s+TERM_CONFIRM_MS\s*=/, "the hook must not keep its own TERM budget");
+  assert.match(source, /import \{[^}]*TERM_CONFIRM_MS[^}]*\} from "\.\/lib\/job-control\.mjs"/);
+  assert.ok(TERM_CONFIRM_MS >= 2 * KILL_GRACE_MS, `TERM_CONFIRM_MS ${TERM_CONFIRM_MS} leaves no margin over KILL_GRACE_MS ${KILL_GRACE_MS}`);
+});
+
+test("SessionEnd still retains a running job with no PID as unconfirmed", () => {
+  const workspace = makeTempDir();
+  try {
+    upsertJob(workspace, {
+      id: "running-nopid",
+      kind: "audit",
+      status: "running",
+      sessionId: "sess-a",
+    });
+    assert.equal(runSessionEnd(workspace, "sess-a").status, 0);
     const jobs = listJobs(workspace);
     assert.equal(jobs.length, 1, "a job that could not be terminated must stay visible");
     assert.equal(jobs[0].status, "cancelled");
+    assert.equal(jobs[0].terminationConfirmed, false);
     assert.match(jobs[0].errorMessage, /no recorded PID/);
   } finally {
     cleanupDir(workspace);

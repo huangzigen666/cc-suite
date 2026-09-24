@@ -39,31 +39,42 @@ export function runnerIdentity() {
   return { pid: process.pid, pidStartedAt: readProcessStartTime(process.pid) };
 }
 
-export function spawnBackend(command, args, { cwd, env, stdin = "ignore" } = {}) {
+// `killTree` is the kill the signal-forwarding handler uses; tests inject a
+// recorder to prove the handler stops killing once dispose() retired it (a
+// reused pgid cannot be produced on demand, so the call itself is observed).
+export function spawnBackend(command, args, { cwd, env, stdin = "ignore", killTree = killBackendTree } = {}) {
   const child = spawn(command, args, {
     cwd,
     env,
     stdio: [stdin, "pipe", "pipe"],
     detached: true,
   });
-  const release = forwardSignalsToTree(child);
+  const { release, retire } = forwardSignalsToTree(child, killTree);
+  retirers.set(child, retire);
   return { child, release };
 }
 
+// child → retire(): called by dispose() once the tree is dead, so a later
+// signal only re-raises instead of signalling a pgid the OS may have reused.
+const retirers = new WeakMap();
+
 // Like process.mjs's installChildSignalForwarding, but the forwarded kill
 // escalates to SIGKILL: /cancel sends the runner SIGTERM, and a backend that
-// ignores SIGTERM must not outlive it. killBackendTree finishes within
-// KILL_GRACE_MS plus a poll, inside job-control's 1500ms TERM_CONFIRM_MS, so
-// the runner has cleaned up before cancel would escalate on the runner itself.
-function forwardSignalsToTree(child, signals = ["SIGINT", "SIGTERM", "SIGHUP"]) {
+// ignores SIGTERM must not outlive it. killBackendTree takes KILL_GRACE_MS plus
+// its `ps` polls, well inside job-control's 3000ms TERM_CONFIRM_MS, so the
+// runner has cleaned up before cancel would escalate on the runner itself.
+function forwardSignalsToTree(child, killTree, signals = ["SIGINT", "SIGTERM", "SIGHUP"]) {
   const handlers = new Map();
+  let retired = false;
   const release = () => {
     for (const [signal, handler] of handlers) process.removeListener(signal, handler);
     handlers.clear();
   };
   for (const signal of signals) {
     const handler = () => {
-      try { killBackendTree(child.pid); } catch { /* nothing left to kill */ }
+      if (!retired) {
+        try { killTree(child.pid); } catch { /* nothing left to kill */ }
+      }
       release();
       try {
         process.kill(process.pid, signal);
@@ -74,7 +85,7 @@ function forwardSignalsToTree(child, signals = ["SIGINT", "SIGTERM", "SIGHUP"]) 
     handlers.set(signal, handler);
     process.on(signal, handler);
   }
-  return release;
+  return { release, retire: () => { retired = true; } };
 }
 
 // Pids in process group `pgid` that have not exited. Zombies are excluded: they
@@ -163,6 +174,10 @@ export function superviseBackend(child, {
 
   child.on("exit", () => {
     if (disposed) return;
+    // The backend finished; only the pipes remain. The drain window bounds
+    // that wait, and a deadline landing inside it would mislabel a completed
+    // run as stalled.
+    clearTimeout(deadlineTimer);
     drainTimer = setTimeout(guard(() => {
       if (disposed) return;
       onDrain();
@@ -180,10 +195,16 @@ export function superviseBackend(child, {
       // the synchronous kill below is queued for the event loop; removing the
       // listeners before it is dispatched either let the default action end
       // the runner mid-kill (backend left alive) or dropped the signal (runner
-      // never exits). Leaving them is safe: each handler kills the tree,
-      // removes itself, and re-raises, so it never suppresses termination, and
-      // signal listeners do not keep the process alive.
-      killBackendTree(child.pid);
+      // never exits). Leaving them is safe: each handler removes itself and
+      // re-raises, so it never suppresses termination, and signal listeners do
+      // not keep the process alive. Retiring them afterwards stops a late
+      // signal from killing a pgid the OS has since reused.
+      //
+      // forceClose, not just the kill: a descendant that left the group
+      // (setsid) can still hold stdout, and on the error path nothing else
+      // destroys the pipes, so the open handle would keep the runner alive.
+      forceClose();
+      retirers.get(child)?.();
     },
   };
 }

@@ -136,16 +136,16 @@ function runBackground(cwd, args, spec) {
 }
 
 async function runBackgroundWorker(cwd, args, jobId, spec) {
-  const logFile = createJobLogFile(cwd, jobId);
   const claimed = claimJob(cwd, jobId, {
     status: "running", ...runnerIdentity(),
     startedAt: new Date().toISOString(),
     deadlineAt: new Date(Date.now() + args.timeoutMs).toISOString(),
   });
-  if (!claimed) {
-    appendLog(logFile, "Background worker exiting — job was cancelled before startup");
-    return;
-  }
+  // Claim before touching the log: a job removed or cancelled before its
+  // worker started (SessionEnd drops queued records and their logs) must not
+  // get its log recreated as an orphan no state record points to.
+  if (!claimed) return;
+  const logFile = createJobLogFile(cwd, jobId);
   appendLog(logFile, `Background worker started (backend=${spec.label})`);
 
   const result = await spec.execute(cwd, args, logFile);

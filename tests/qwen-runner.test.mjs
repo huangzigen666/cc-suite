@@ -212,11 +212,14 @@ test("qwen runner resumes the same session after a missing result", () => {
 });
 
 test("a timeout with a truncated JSON line resumes instead of failing parsing", () => {
+  // The idle window starts at spawn, so it also covers the fake's node
+  // startup; 500ms was shorter than that startup under full-suite load, the
+  // fake emitted no init event (no session id), and the resume never happened.
   const run = runFake("timeout-resume", [], {
     maxResumes: 1,
-    attemptTimeoutMs: 2000,
-    idleTimeoutMs: 500,
-    timeoutMs: 5000,
+    attemptTimeoutMs: 6000,
+    idleTimeoutMs: 1500,
+    timeoutMs: 15000,
   });
   try {
     assert.equal(run.result.status, 0, JSON.stringify(run.output));

@@ -3,7 +3,7 @@ import test, { before, after } from "node:test";
 import assert from "node:assert/strict";
 
 import { makeTempDir, cleanupDir, isolateEnv } from "./helpers.mjs";
-import { listJobs, upsertJob } from "../scripts/lib/state.mjs";
+import { claimJob, listJobs, upsertJob } from "../scripts/lib/state.mjs";
 import { processAlive, readProcessStartTime } from "../scripts/lib/process.mjs";
 import {
   sortJobsNewestFirst,
@@ -272,11 +272,29 @@ test("cancelJob terminates a job process it owns and confirms the exit", async (
   }
 });
 
-test("cancelJob records why a job with no PID could not be signalled", () => {
+test("cancelJob cancels a queued job atomically so its worker never claims it", () => {
   const workspace = makeTempDir();
   try {
     upsertJob(workspace, { id: "cancel-queued", kind: "audit", status: "queued" });
     const result = cancelJob(workspace, "cancel-queued");
+    assert.equal(result.outcome, "terminated");
+    assert.equal(result.terminated, true);
+    assert.match(result.detail, /before its worker started/);
+    const job = listJobs(workspace)[0];
+    assert.equal(job.status, "cancelled");
+    assert.equal(job.terminationConfirmed, true);
+    // The worker's claim is refused, so no backend starts.
+    assert.equal(claimJob(workspace, "cancel-queued", { status: "running" }), false);
+  } finally {
+    cleanupDir(workspace);
+  }
+});
+
+test("cancelJob records why a running job with no PID could not be signalled", () => {
+  const workspace = makeTempDir();
+  try {
+    upsertJob(workspace, { id: "cancel-nopid", kind: "audit", status: "running" });
+    const result = cancelJob(workspace, "cancel-nopid");
     assert.equal(result.outcome, "no-pid");
     assert.equal(result.terminated, false);
     const job = listJobs(workspace)[0];

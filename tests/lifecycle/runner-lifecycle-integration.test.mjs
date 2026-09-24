@@ -35,6 +35,9 @@ const RUNNERS = {
 //   mimo-orphan   print a mimo answer, leave a grandchild holding stdout, exit 0
 //   mimo-split    print a mimo answer whose 中 is split across two writes
 //   mimo-stderr   write to stderr every 100ms, never answer
+//   escaped-stderr  like mimo-stderr, but the grandchild calls setsid (leaves
+//                 the backend's process group) and keeps stdout open, so no
+//                 group kill can reach it and only closing the pipes frees the runner
 //   epipe         close stdin, then send a JSON-RPC request the runner must
 //                 answer: the answer is written to a pipe with no reader
 const FAKE = `#!/usr/bin/env node
@@ -43,8 +46,8 @@ const { spawn } = require("child_process");
 const NL = String.fromCharCode(10);
 const mode = process.env.FAKE_MODE || "hang";
 if (process.env.FAKE_MARKER) fs.writeFileSync(process.env.FAKE_MARKER, String(process.pid));
-function grandchild(stdio) {
-  const g = spawn("sh", ["-c", "trap '' TERM; while :; do sleep 1; done"], { stdio });
+function grandchild(stdio, detached = false) {
+  const g = spawn("sh", ["-c", "trap '' TERM; while :; do sleep 1; done"], { stdio, detached });
   fs.writeFileSync(process.env.FAKE_GRANDCHILD, String(g.pid));
   return g;
 }
@@ -69,6 +72,9 @@ if (mode === "hang") {
   setTimeout(() => { process.stdout.write(bytes.subarray(cut)); setTimeout(() => process.exit(0), 20); }, 150);
 } else if (mode === "mimo-stderr") {
   grandchild(["ignore", "ignore", "ignore"]);
+  setInterval(() => process.stderr.write("tick" + NL), 100);
+} else if (mode === "escaped-stderr") {
+  grandchild(["ignore", "inherit", "ignore"], true).unref();
   setInterval(() => process.stderr.write("tick" + NL), 100);
 }
 `;
@@ -203,6 +209,24 @@ for (const backend of Object.keys(RUNNERS)) {
     } finally { ctx.cleanup(); }
   });
 
+  test(`${backend}: a worker whose queued record was removed exits without recreating its log`, TEST_TIMEOUT, () => {
+    const ctx = setup(backend);
+    try {
+      // SessionEnd drops queued records (and their logs); a late worker must
+      // neither start the backend nor leave an orphan log behind.
+      const jobId = `${backend}-gone-1`;
+      const logFile = withState(ctx, () => path.join(path.dirname(resolveJobFile(ctx.workspace, jobId)), `${jobId}.log`));
+      const r = spawnSync(process.execPath, ctx.runnerArgs(["--timeout-ms", "60000"]), {
+        cwd: ctx.workspace, encoding: "utf8", timeout: 15000,
+        env: { ...ctx.env, CODEX_TOOLKIT_BACKGROUND_JOB_ID: jobId },
+      });
+      assert.equal(r.status, 0, r.stderr);
+      assert.equal(fs.existsSync(ctx.env.FAKE_MARKER), false, "backend must not start");
+      assert.equal(fs.existsSync(logFile), false, "orphan log recreated");
+      assert.equal(withState(ctx, () => listJobs(ctx.workspace).length), 0, "record resurrected");
+    } finally { ctx.cleanup(); }
+  });
+
   test(`${backend}: the deadline kills the whole backend tree and reports stalled`, TEST_TIMEOUT, async () => {
     const ctx = setup(backend);
     try {
@@ -332,5 +356,72 @@ test("a crash after the job was cancelled reports cancelled, matching the state 
     const parsed = JSON.parse(r.stdout.trim().split(NL).pop());
     assert.equal(parsed.status, "cancelled", JSON.stringify(parsed));
     assert.equal(withState(ctx, () => listJobs(ctx.workspace)[0].status), "cancelled");
+  } finally { ctx.cleanup(); }
+});
+
+test("a callback error while an escaped descendant holds stdout still ends the runner", TEST_TIMEOUT, async () => {
+  const ctx = setup("mimo");
+  try {
+    const { done } = startRunner(ctx, ["--timeout-ms", "60000"], { FAKE_MODE: "escaped-stderr" });
+    await waitFor(() => fs.existsSync(ctx.env.FAKE_GRANDCHILD));
+    const job = withState(ctx, () => listJobs(ctx.workspace)[0]);
+    fs.chmodSync(job.logFile, 0o400);
+    // Regression: the error path disposed without closing the pipes, so the
+    // escaped holder kept the runner's stdout handle open and it never exited.
+    const { parsed, stdout } = await done;
+    assert.ok(parsed, stdout);
+    assert.equal(parsed.status, "failed", JSON.stringify(parsed));
+    assert.match(parsed.error, /Runner callback failed/);
+  } finally { ctx.cleanup(); }
+});
+
+test("a backend that answered and exited is not stalled by a deadline during the drain", TEST_TIMEOUT, async () => {
+  const ctx = setup("mimo");
+  try {
+    // The deadline (1000ms) falls inside the 2000ms drain window that starts
+    // when the backend exits with its answer and an orphan holds the pipe.
+    const { done } = startRunner(ctx, ["--timeout-ms", "1000"], { FAKE_MODE: "mimo-orphan" });
+    const { parsed, stdout } = await done;
+    assert.ok(parsed, stdout);
+    assert.equal(parsed.status, "completed", JSON.stringify(parsed));
+    assert.equal(parsed.rawOutput, "ORPHAN OK");
+    assert.equal(processAlive(pidFrom(ctx.env.FAKE_GRANDCHILD)), false, "orphan survived");
+  } finally { ctx.cleanup(); }
+});
+
+test("after dispose, a late signal is re-raised without signalling any process group", TEST_TIMEOUT, async () => {
+  const ctx = setup("mimo");
+  try {
+    // By the time a late signal arrives the backend's pgid may belong to an
+    // unrelated process, so the handler must not attempt a tree kill at all.
+    const record = path.join(ctx.workspace, "late-kills.txt");
+    const script = path.join(ctx.workspace, "late-signal.mjs");
+    fs.writeFileSync(script, [
+      'import fs from "node:fs";',
+      `import { killBackendTree, spawnBackend, superviseBackend } from ${JSON.stringify(LIFECYCLE)};`,
+      "let disposed = false;",
+      "// Record any tree kill the forwarding handler attempts after dispose.",
+      "const killTree = (pid) => {",
+      `  if (disposed) fs.appendFileSync(${JSON.stringify(record)}, String(pid) + String.fromCharCode(10));`,
+      "  return killBackendTree(pid);",
+      "};",
+      'const { child, release } = spawnBackend("sh", ["-c", "echo started; sleep 0.2"], { killTree });',
+      "const sup = superviseBackend(child, { timeoutMs: 60000, release, onError: (e) => { throw e; } });",
+      'child.on("close", () => {',
+      "  sup.dispose();",
+      "  disposed = true;",
+      '  fs.writeSync(1, "DISPOSED" + String.fromCharCode(10));',
+      "});",
+      "setInterval(() => {}, 1000);",
+    ].join(NL));
+    const runner = spawn(process.execPath, [script], { cwd: ctx.workspace });
+    ctx.children.push(runner);
+    let out = "";
+    runner.stdout.on("data", (c) => { out += c; });
+    await waitFor(() => out.includes("DISPOSED"));
+    runner.kill("SIGTERM");
+    const exit = await settleWithin(new Promise((r) => runner.on("close", (code, signal) => r({ code, signal }))), runner);
+    assert.equal(exit.signal, "SIGTERM", "the late signal must still end the runner");
+    assert.equal(fs.existsSync(record), false, `tree kill attempted after dispose: ${fs.existsSync(record) ? fs.readFileSync(record, "utf8") : ""}`);
   } finally { ctx.cleanup(); }
 });
