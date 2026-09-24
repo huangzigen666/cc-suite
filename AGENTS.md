@@ -23,6 +23,8 @@ description: "Project instructions for cc-suite — the Claude Code plugin that 
 - **Antigravity CLI (`agy`)** (optional) — required for the Google backend, `/cc-suite:agy-preflight`, and headless agy delegation
 - **Grok Build (`grok`, xAI)** (optional) — required for the Claude→Grok ACP delegation lane (`/cc-suite:grok`) and `/cc-suite:grok-preflight`
 - **Qwen Code (`qwen`, ≥ 0.21.0)** (optional) — required for the bounded, read-only `/cc-suite:qwen-review` lane and `/cc-suite:qwen-preflight`
+- **ZCode (Z.AI desktop app)** (optional) — required for the `zcode` delegate backend; the runner uses the CLI bundled at `ZCode.app/Contents/Resources/glm/zcode.cjs` (override with `ZCODE_BIN`) and needs a Z.AI login
+- **`doubao` CLI (npm `doubao-cli`) + Doubao.app** (optional) — required for the `doubao` delegate backend (chat-only, no workspace access); Doubao.app must be running with CDP enabled (`doubao cdp launch`)
 - **Bash** — required by all `scripts/*.sh` files
 - **`claude-octopus`** (npm, pinned) — the MCP server cc-suite registers in `.codex/config.toml` so Codex can delegate to Claude. cc-suite does not install it explicitly; `mcp_claude.sh` writes a `npx -y claude-octopus@<pin>` invocation and npm fetches it on first Codex start. The pin lives in `scripts/lib/claude-octopus-pin.txt` — single source of truth, read by `mcp_claude.sh`, the integration suite, and the boot-handshake test.
 
