@@ -20,9 +20,10 @@ import {
   generateJobId,
   createJobLogFile,
   resolveJobLogFile,
+  finalizeJob,
   upsertJob,
-  writeJobFile,
 } from "./lib/state.mjs";
+import { createTextDecoder, finalizedOutcome } from "./lib/runner-lifecycle.mjs";
 import { readProcessStartTime } from "./lib/process.mjs";
 import { withDelegationBoundary } from "./lib/delegation-boundary.mjs";
 import {
@@ -348,15 +349,13 @@ function markActiveJobsInterrupted(signal) {
   const completedAt = new Date().toISOString();
   for (const context of ACTIVE_JOB_CONTEXTS) {
     try {
-      upsertJob(context.cwd, {
-        id: context.jobId,
+      finalizeJob(context.cwd, context.jobId, {
         status: "failed",
         phase: "failed",
         errorCode: "interrupted",
         errorMessage,
         completedAt,
-      });
-      writeJobFile(context.cwd, context.jobId, {
+      }, {
         rawOutput: "",
         threadId: null,
         attempts: [],
@@ -423,6 +422,7 @@ function executeQwenAttempt(cwd, args, targets, logFile, attempt, resumeId, prom
     const decoder = new JsonlDecoder();
     const capture = args.debugCapture ? debugCapturePaths(logFile, attempt) : null;
     let stderrTail = "";
+    const stderrText = createTextDecoder();
     let settled = false;
     let timedOut = false;
     let timeoutReason = null;
@@ -579,7 +579,7 @@ function executeQwenAttempt(cwd, args, targets, logFile, attempt, resumeId, prom
     child.stderr.on("data", guarded((chunk) => {
       resetIdleTimer();
       if (capture) appendPrivate(capture.stderr, chunk);
-      stderrTail = (stderrTail + chunk.toString("utf8")).slice(-4000);
+      stderrTail = (stderrTail + stderrText.write(chunk)).slice(-4000);
     }));
 
     child.on("error", (error) => {
@@ -848,48 +848,53 @@ async function runForeground(cwd, args) {
     } finally {
       if (stage) cleanupReviewStage(stage);
     }
-    upsertJob(cwd, {
-      id: jobId,
+    const finalized = finalizeJob(cwd, jobId, {
       status: result.status,
       phase: result.status,
       threadId: result.sessionId || null,
       attempts: result.attempts.length,
       completedAt: new Date().toISOString(),
       ...(result.errorMessage ? { errorMessage: result.errorMessage, errorCode: result.errorCode } : {}),
-    });
-    writeJobFile(cwd, jobId, jobPayload(result));
+    }, jobPayload(result));
+    const outcome = finalizedOutcome(finalized, result);
+    // Name why the commit went the way it did: a record that vanished is not a
+    // cancellation, and an unwritable result file is not the backend's error.
+    const errorCode = !finalized.committed
+      ? (finalized.status || "record_missing")
+      : (finalized.resultFileError ? "result_file_unwritable" : result.errorCode);
 
     process.stdout.write(JSON.stringify({
       jobId,
-      status: result.status,
+      status: outcome.status,
       threadId: result.sessionId || null,
-      rawOutput: result.rawOutput || "",
+      rawOutput: outcome.rawOutput,
       attempts: result.attempts,
-      targetsVerified: result.status === "completed",
-      ...(result.errorMessage ? { error: result.errorMessage, errorCode: result.errorCode } : {}),
+      targetsVerified: outcome.status === "completed",
+      ...(outcome.errorMessage ? { error: outcome.errorMessage, errorCode } : {}),
     }) + "\n");
-    if (result.status !== "completed") process.exitCode = 1;
+    if (outcome.status !== "completed") process.exitCode = 1;
   } catch (error) {
     const code = error instanceof QwenStreamError ? error.code : "runner_failure";
     const message = redactDiagnostic(error.message);
     // Finalize job state first: a logging failure must never leave the job
     // recorded as running.
+    let status = "failed";
     try {
-      upsertJob(cwd, {
-        id: jobId,
+      const finalized = finalizeJob(cwd, jobId, {
         status: "failed",
         phase: "failed",
         errorCode: code,
         errorMessage: message,
         completedAt: new Date().toISOString(),
-      });
-      writeJobFile(cwd, jobId, {
+      }, {
         rawOutput: "",
         threadId: null,
         attempts: [],
         error: message,
         errorCode: code,
       });
+      // A job cancelled before the failure stays cancelled; report that.
+      if (!finalized.committed && finalized.status) status = finalized.status;
     } catch {
       // State unwritable — the stdout result below still reports the failure.
     }
@@ -900,12 +905,13 @@ async function runForeground(cwd, args) {
     }
     process.stdout.write(JSON.stringify({
       jobId,
-      status: "failed",
+      status,
       threadId: null,
       rawOutput: "",
       attempts: [],
       targetsVerified: false,
-      errorCode: code,
+      // A refused commit names the status the record holds, not the exception.
+      errorCode: status === "failed" ? code : status,
       error: message,
     }) + "\n");
     process.exitCode = 1;
@@ -959,15 +965,13 @@ function runBackground(cwd, args) {
   return new Promise((resolve) => {
     child.once("error", (error) => {
       const message = redactDiagnostic(error.message);
-      upsertJob(cwd, {
-        id: jobId,
+      finalizeJob(cwd, jobId, {
         status: "failed",
         phase: "failed",
         errorCode: "spawn_failure",
         errorMessage: message,
         completedAt: new Date().toISOString(),
-      });
-      writeJobFile(cwd, jobId, {
+      }, {
         rawOutput: "",
         threadId: null,
         attempts: [],
@@ -1032,16 +1036,14 @@ async function runBackgroundWorker(cwd, args, jobId) {
     } finally {
       if (stage) cleanupReviewStage(stage);
     }
-    upsertJob(cwd, {
-      id: jobId,
+    finalizeJob(cwd, jobId, {
       status: result.status,
       phase: result.status,
       threadId: result.sessionId || null,
       attempts: result.attempts.length,
       completedAt: new Date().toISOString(),
       ...(result.errorMessage ? { errorMessage: result.errorMessage, errorCode: result.errorCode } : {}),
-    });
-    writeJobFile(cwd, jobId, jobPayload(result));
+    }, jobPayload(result));
   } finally {
     ACTIVE_JOB_CONTEXTS.delete(jobContext);
   }
@@ -1099,27 +1101,21 @@ async function main() {
       // persistence is the thing that failed, this catch block must not
       // reject and strand the job.
       try {
-        upsertJob(cwd, {
-          id: backgroundJobId,
+        finalizeJob(cwd, backgroundJobId, {
           status: "failed",
           phase: "failed",
           errorCode: code,
           errorMessage: message,
           completedAt: new Date().toISOString(),
-        });
-      } catch (persistError) {
-        process.stderr.write(`Error: failed to persist job failure: ${persistError?.message || persistError}\n`);
-      }
-      try {
-        writeJobFile(cwd, backgroundJobId, {
+        }, {
           rawOutput: "",
           threadId: null,
           attempts: [],
           error: message,
           errorCode: code,
         });
-      } catch {
-        // Result file unwritable — the job state above is the primary record.
+      } catch (persistError) {
+        process.stderr.write(`Error: failed to persist job failure: ${persistError?.message || persistError}\n`);
       }
       try {
         appendLog(resolveJobLogFile(cwd, backgroundJobId), `Background worker failed: ${code}: ${message}`);

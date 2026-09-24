@@ -1,8 +1,8 @@
 #!/usr/bin/env node
 // mimo-runner.mjs — Run Xiaomi MiMo Code (`mimo`, an opencode-family coding
-// agent) tasks in foreground or background with job tracking. Mirrors the
-// zcode/qoder runners (same lib API) so /cc-suite:status, /result, /cancel,
-// and /continue work identically across all backends.
+// agent) tasks in foreground or background with job tracking. The job
+// lifecycle lives in lib/job-runner.mjs and the process handling in
+// lib/runner-lifecycle.mjs; this file owns only the MiMo transport.
 //
 // Usage:
 //   node mimo-runner.mjs --kind <kind> --model <provider/model> --effort <variant> \
@@ -30,8 +30,13 @@
 //
 // Sandbox mapping (cc-suite vocabulary → MiMo permissions):
 //   read-only          → MIMOCODE_PERMISSION denies "*" and re-allows only
-//                        read/search tools; denied tools are removed from the
-//                        agent's tool set (verified: no write, edit, or bash).
+//                        local read/search tools; denied tools are removed from
+//                        the agent's tool set (verified: no write, edit, or
+//                        bash). webfetch/websearch/codesearch are denied too, so
+//                        a read-only review cannot send workspace content to an
+//                        arbitrary URL. That narrows exfiltration; it does not
+//                        stop it — the model request itself carries source.
+//                        Research that needs the network: use workspace-write.
 //   workspace-write    → MiMo defaults, plus external_directory denied. Bash
 //                        stays allowed, so this is best-effort, not a jail.
 //   danger-full-access → --dangerously-skip-permissions.
@@ -39,20 +44,19 @@
 import fs from "node:fs";
 import process from "node:process";
 import { fileURLToPath } from "node:url";
-import { spawn } from "node:child_process";
 
-import {
-  generateJobId,
-  upsertJob,
-  writeJobFile,
-  resolveJobLogFile,
-} from "./lib/state.mjs";
-import { resolveWorkspaceRoot } from "./lib/workspace.mjs";
 import { withDelegationBoundary } from "./lib/delegation-boundary.mjs";
+import { appendLog, runJobMain } from "./lib/job-runner.mjs";
+import {
+  createLineReader,
+  createTextDecoder,
+  guard,
+  spawnBackend,
+  superviseBackend,
+} from "./lib/runner-lifecycle.mjs";
 
 const DEFAULT_TIMEOUT_MS = 15 * 60 * 1000; // 15 minutes — matches the other runners
 const HEARTBEAT_MS = 30 * 1000;
-const SIGKILL_GRACE_MS = 5 * 1000;
 const DEFAULT_MODEL = "deepseek/deepseek-flash";
 // The MiMo installer puts the binary here and only adds it to interactive
 // shell PATHs, so a runner spawned from a non-login shell may not see `mimo`.
@@ -68,9 +72,6 @@ const READ_ONLY_PERMISSION = JSON.stringify({
   lsp: "allow",
   todoread: "allow",
   todowrite: "allow",
-  webfetch: "allow",
-  websearch: "allow",
-  codesearch: "allow",
 });
 const WORKSPACE_WRITE_PERMISSION = JSON.stringify({ external_directory: "deny" });
 
@@ -110,10 +111,6 @@ function parseArgs(argv) {
   return args;
 }
 
-function appendLog(logFile, message) {
-  fs.appendFileSync(logFile, `[${new Date().toISOString()}] ${message}\n`, "utf8");
-}
-
 // Unknown sandbox levels fall to read-only.
 function mimoSandbox(sandbox) {
   if (sandbox === "danger-full-access") return { flags: ["--dangerously-skip-permissions"], permission: null };
@@ -151,38 +148,47 @@ function executeMimo(cwd, args, logFile) {
     appendLog(logFile, `Sandbox: ${args.sandbox}${permission ? ` (MIMOCODE_PERMISSION=${permission})` : ""}`);
     appendLog(logFile, `Deadline: ${Math.round(args.timeoutMs / 1000)}s`);
 
-    const child = spawn(bin, mArgs, { cwd, stdio: ["ignore", "pipe", "pipe"], env });
+    const { child, release } = spawnBackend(bin, mArgs, { cwd, env });
 
     const startedAt = Date.now();
-    let buf = "";
     let stderrTail = "";
     const texts = [];
     const errors = [];
     let sessionId = args.resume || null;
     let settled = false;
     let timedOut = false;
+    let heartbeat = null;
 
-    const heartbeat = setInterval(() => {
-      appendLog(logFile, `…still running (${Math.round((Date.now() - startedAt) / 1000)}s elapsed)`);
-    }, HEARTBEAT_MS);
-
-    const deadline = setTimeout(() => {
-      timedOut = true;
-      appendLog(logFile, `Deadline exceeded (${Math.round(args.timeoutMs / 1000)}s) — terminating`);
-      child.kill("SIGTERM");
-      setTimeout(() => { if (!settled) child.kill("SIGKILL"); }, SIGKILL_GRACE_MS);
-    }, args.timeoutMs);
+    const answer = () => texts.join("\n\n").trim();
 
     function finish(result) {
       if (settled) return;
       settled = true;
       clearInterval(heartbeat);
-      clearTimeout(deadline);
-      try { child.kill(); } catch { /* already dead */ }
+      supervisor.dispose();
       resolve(result);
     }
 
-    function handleLine(line) {
+    function fail(error) {
+      finish({ status: "failed", errorMessage: `Runner callback failed: ${error?.message || error}`, sessionId, rawOutput: answer() });
+    }
+
+    const supervisor = superviseBackend(child, {
+      timeoutMs: args.timeoutMs,
+      release,
+      onError: fail,
+      onDeadline: () => {
+        timedOut = true;
+        appendLog(logFile, `Deadline exceeded (${Math.round(args.timeoutMs / 1000)}s) — terminating the process tree`);
+      },
+      onDrain: () => appendLog(logFile, "mimo exited but its output pipes stayed open — terminating leftover processes"),
+    });
+
+    heartbeat = setInterval(guard(() => {
+      appendLog(logFile, `…still running (${Math.round((Date.now() - startedAt) / 1000)}s elapsed)`);
+    }, fail), HEARTBEAT_MS);
+
+    const lines = createLineReader((line) => {
       let m;
       try { m = JSON.parse(line); } catch { return; }
       if (m.sessionID) sessionId = m.sessionID;
@@ -192,184 +198,55 @@ function executeMimo(cwd, args, logFile) {
         const e = m.error || {};
         errors.push((e.data && e.data.message) || e.message || e.name || "unknown error");
       }
-    }
-
-    child.stdout.on("data", (chunk) => {
-      buf += chunk.toString("utf8");
-      let nl;
-      while ((nl = buf.indexOf("\n")) !== -1) {
-        const line = buf.slice(0, nl).trim();
-        buf = buf.slice(nl + 1);
-        if (line) handleLine(line);
-      }
     });
+    const stderrText = createTextDecoder();
 
-    child.stderr.on("data", (chunk) => {
-      const text = chunk.toString();
+    child.stdout.on("data", guard((chunk) => lines.write(chunk), fail));
+
+    child.stderr.on("data", guard((chunk) => {
+      const text = stderrText.write(chunk);
       stderrTail = (stderrTail + text).slice(-3000);
       fs.appendFileSync(logFile, text, "utf8");
-    });
+    }, fail));
 
-    child.on("error", (err) => {
+    child.on("error", guard((err) => {
       const hint = err.code === "ENOENT"
         ? "mimo not found on PATH — install MiMo Code (~/.mimocode/bin/mimo) or set MIMO_BIN"
         : err.message;
       appendLog(logFile, `Spawn error: ${hint}`);
       finish({ status: "failed", errorMessage: hint, sessionId: null, rawOutput: "" });
-    });
+    }, fail));
 
-    child.on("close", (code, signal) => {
+    child.on("close", guard((code, signal) => {
       if (settled) return;
-      if (buf.trim()) handleLine(buf.trim());
+      lines.end();
       const msg = code === null ? `signal ${signal}` : `exit ${code}`;
-      const answer = texts.join("\n\n").trim();
 
       if (timedOut) {
-        finish({ status: "stalled", errorMessage: `Timed out after ${Math.round(args.timeoutMs / 1000)}s`, sessionId, rawOutput: answer });
+        finish({ status: "stalled", errorMessage: `Timed out after ${Math.round(args.timeoutMs / 1000)}s`, sessionId, rawOutput: answer() });
         return;
       }
       if (errors.length > 0) {
         // mimo exits 0 after an error event; the event is authoritative.
-        finish({ status: "failed", errorMessage: `mimo: ${errors[errors.length - 1]}`, sessionId, rawOutput: answer });
+        finish({ status: "failed", errorMessage: `mimo: ${errors[errors.length - 1]}`, sessionId, rawOutput: answer() });
         return;
       }
       if (code !== 0) {
-        finish({ status: "failed", errorMessage: stderrTail.trim() || `mimo ${msg}`, sessionId, rawOutput: answer });
+        finish({ status: "failed", errorMessage: stderrTail.trim() || `mimo ${msg}`, sessionId, rawOutput: answer() });
         return;
       }
-      if (!answer) {
+      if (!answer()) {
         finish({ status: "failed", errorMessage: "mimo exited cleanly but produced no answer", sessionId, rawOutput: "" });
         return;
       }
-      finish({ status: "completed", sessionId, rawOutput: answer });
-    });
+      finish({ status: "completed", sessionId, rawOutput: answer() });
+    }, fail));
   });
 }
 
-async function runForeground(cwd, args) {
-  const jobId = generateJobId(args.kind);
-  const logFile = resolveJobLogFile(cwd, jobId);
-  const sessionId = args.sessionId || process.env.CODEX_TOOLKIT_SESSION_ID || null;
-  const deadlineAt = new Date(Date.now() + args.timeoutMs).toISOString();
-
-  upsertJob(cwd, {
-    id: jobId, kind: args.kind, status: "running",
-    summary: args.summary || `${args.kind} task`,
-    sessionId, pid: process.pid,
-    startedAt: new Date().toISOString(), deadlineAt, logFile,
-  });
-  appendLog(logFile, `Starting ${args.kind} task (foreground, backend=mimo/run)`);
-
-  const result = await executeMimo(cwd, args, logFile);
-
-  upsertJob(cwd, {
-    id: jobId, status: result.status,
-    threadId: result.sessionId || null,
-    completedAt: new Date().toISOString(),
-    ...(result.errorMessage ? { errorMessage: result.errorMessage } : {}),
-  });
-  writeJobFile(cwd, jobId, {
-    rawOutput: result.rawOutput || "",
-    threadId: result.sessionId || null,
-    ...(result.errorMessage ? { error: result.errorMessage } : {}),
-  });
-
-  const output = {
-    jobId, status: result.status,
-    threadId: result.sessionId || null,
-    rawOutput: result.rawOutput || "",
-    ...(result.errorMessage ? { error: result.errorMessage } : {}),
-  };
-  process.stdout.write(JSON.stringify(output) + "\n");
-  if (result.status !== "completed") process.exitCode = 1;
-}
-
-function runBackground(cwd, args) {
-  const jobId = generateJobId(args.kind);
-  const logFile = resolveJobLogFile(cwd, jobId);
-  const sessionId = args.sessionId || process.env.CODEX_TOOLKIT_SESSION_ID || null;
-
-  upsertJob(cwd, {
-    id: jobId, kind: args.kind, status: "queued",
-    summary: args.summary || `${args.kind} task`, sessionId, logFile,
-  });
-  appendLog(logFile, `Queued ${args.kind} task (background, backend=mimo/run)`);
-
-  const childArgv = [
-    fileURLToPath(import.meta.url),
-    "--kind", args.kind,
-    "--model", args.model || "",
-    "--effort", args.effort || "",
-    "--sandbox", args.sandbox,
-    "--timeout-ms", String(args.timeoutMs),
-    "--session-id", sessionId || "",
-    "--summary", args.summary || "",
-  ];
-  if (args.resume) childArgv.push("--resume", args.resume);
-  childArgv.push("--", args.prompt);
-
-  const child = spawn(process.execPath, childArgv, {
-    cwd, detached: true, stdio: "ignore",
-    env: { ...process.env, CODEX_TOOLKIT_BACKGROUND_JOB_ID: jobId },
-  });
-
-  child.on("error", (err) => {
-    appendLog(logFile, `Background spawn error: ${err.message}`);
-    upsertJob(cwd, {
-      id: jobId, status: "failed",
-      errorMessage: `Failed to start background worker: ${err.message}`,
-      completedAt: new Date().toISOString(),
-    });
-  });
-  child.unref();
-
-  process.stdout.write(JSON.stringify({ jobId, status: "queued", message: `Job ${jobId} started in background.` }) + "\n");
-}
-
-async function runBackgroundWorker(cwd, args, jobId) {
-  const logFile = resolveJobLogFile(cwd, jobId);
-  upsertJob(cwd, {
-    id: jobId, status: "running", pid: process.pid,
-    startedAt: new Date().toISOString(),
-    deadlineAt: new Date(Date.now() + args.timeoutMs).toISOString(),
-  });
-  appendLog(logFile, "Background worker started (backend=mimo/run)");
-
-  const result = await executeMimo(cwd, args, logFile);
-
-  upsertJob(cwd, {
-    id: jobId, status: result.status,
-    threadId: result.sessionId || null,
-    completedAt: new Date().toISOString(),
-    ...(result.errorMessage ? { errorMessage: result.errorMessage } : {}),
-  });
-  writeJobFile(cwd, jobId, {
-    rawOutput: result.rawOutput || "",
-    threadId: result.sessionId || null,
-    ...(result.errorMessage ? { error: result.errorMessage } : {}),
-  });
-}
-
-async function main() {
-  const args = parseArgs(process.argv);
-  if (!args.prompt) {
-    process.stderr.write("Error: no prompt provided. Use -- <prompt>\n");
-    process.exit(1);
-  }
-  const cwd = resolveWorkspaceRoot(process.cwd());
-
-  const backgroundJobId = process.env.CODEX_TOOLKIT_BACKGROUND_JOB_ID;
-  if (backgroundJobId) {
-    await runBackgroundWorker(cwd, args, backgroundJobId);
-    return;
-  }
-  if (args.background) runBackground(cwd, args);
-  else await runForeground(cwd, args);
-}
-
-main().catch((error) => {
-  const message = error?.message || String(error);
-  process.stdout.write(JSON.stringify({ status: "failed", error: message }) + "\n");
-  process.stderr.write(`Error: ${message}\n`);
-  process.exitCode = 1;
+runJobMain({
+  args: parseArgs(process.argv),
+  execute: executeMimo,
+  label: "mimo/run",
+  scriptPath: fileURLToPath(import.meta.url),
 });

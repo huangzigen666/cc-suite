@@ -36,20 +36,18 @@
 import fs from "node:fs";
 import process from "node:process";
 import { fileURLToPath } from "node:url";
-import { spawn } from "node:child_process";
 
-import {
-  generateJobId,
-  upsertJob,
-  writeJobFile,
-  resolveJobLogFile,
-} from "./lib/state.mjs";
-import { resolveWorkspaceRoot } from "./lib/workspace.mjs";
 import { withDelegationBoundary } from "./lib/delegation-boundary.mjs";
+import { appendLog, runJobMain } from "./lib/job-runner.mjs";
+import {
+  createTextDecoder,
+  guard,
+  spawnBackend,
+  superviseBackend,
+} from "./lib/runner-lifecycle.mjs";
 
 const DEFAULT_TIMEOUT_MS = 15 * 60 * 1000; // 15 minutes — matches the other runners
 const HEARTBEAT_MS = 30 * 1000;
-const SIGKILL_GRACE_MS = 5 * 1000;
 
 function parseArgs(argv) {
   const args = {
@@ -87,10 +85,6 @@ function parseArgs(argv) {
   return args;
 }
 
-function appendLog(logFile, message) {
-  fs.appendFileSync(logFile, `[${new Date().toISOString()}] ${message}\n`, "utf8");
-}
-
 // Map cc-suite sandbox levels onto Qoder's --permission-mode choices.
 function qoderPermissionMode(sandbox) {
   if (sandbox === "danger-full-access") return "bypass_permissions";
@@ -119,17 +113,15 @@ function executeQoder(cwd, args, logFile) {
   return new Promise((resolve) => {
     const qoderArgs = buildQoderArgs(args, cwd);
 
-    appendLog(logFile, `Exec: qoder ${qoderArgs.join(" ")} (print mode, scraping)`);
+    appendLog(logFile, `Exec: qoder ${qoderArgs.slice(0, -1).join(" ")} <prompt> (print mode, scraping)`);
     appendLog(logFile, `Model: ${args.model || "(default)"}, Effort: ${args.effort || "(default)"}, Sandbox: ${args.sandbox}${args.resume ? ` (resuming ${args.resume})` : ""}`);
     appendLog(logFile, `Deadline: ${Math.round(args.timeoutMs / 1000)}s`);
 
-    const child = spawn("qoder", qoderArgs, {
-      cwd,
-      stdio: ["pipe", "pipe", "pipe"], // stdin unused, stdout: stream-json, stderr: diagnostics
-      env: { ...process.env },
-    });
+    const { child, release } = spawnBackend("qoder", qoderArgs, { cwd, env: { ...process.env } });
 
     const startedAt = Date.now();
+    const stdoutText = createTextDecoder();
+    const stderrText = createTextDecoder();
     let buf = "";
     let stderrTail = "";
     const answer = [];
@@ -137,31 +129,39 @@ function executeQoder(cwd, args, logFile) {
     let anyJsonParsed = false;
     let settled = false;
     let timedOut = false;
+    let heartbeat = null;
     let sessionId = args.resume || null;
     let resultReceived = false;
     let finalResult = null;
     let finalSessionId = null;
     let finalSubtype = null;
 
-    const heartbeat = setInterval(() => {
-      appendLog(logFile, `…still running (${Math.round((Date.now() - startedAt) / 1000)}s elapsed)`);
-    }, HEARTBEAT_MS);
-
-    const deadline = setTimeout(() => {
-      timedOut = true;
-      appendLog(logFile, `Deadline exceeded (${Math.round(args.timeoutMs / 1000)}s) — terminating`);
-      child.kill("SIGTERM");
-      setTimeout(() => { if (!settled) child.kill("SIGKILL"); }, SIGKILL_GRACE_MS);
-    }, args.timeoutMs);
-
     function finish(result) {
       if (settled) return;
       settled = true;
       clearInterval(heartbeat);
-      clearTimeout(deadline);
-      try { child.kill(); } catch { /* already dead */ }
+      supervisor.dispose();
       resolve(result);
     }
+
+    function fail(error) {
+      finish({ status: "failed", errorMessage: `Runner callback failed: ${error?.message || error}`, sessionId, rawOutput: answer.join("").trim() });
+    }
+
+    const supervisor = superviseBackend(child, {
+      timeoutMs: args.timeoutMs,
+      release,
+      onError: fail,
+      onDeadline: () => {
+        timedOut = true;
+        appendLog(logFile, `Deadline exceeded (${Math.round(args.timeoutMs / 1000)}s) — terminating the process tree`);
+      },
+      onDrain: () => appendLog(logFile, "qoder exited but its output pipes stayed open — terminating leftover processes"),
+    });
+
+    heartbeat = setInterval(guard(() => {
+      appendLog(logFile, `…still running (${Math.round((Date.now() - startedAt) / 1000)}s elapsed)`);
+    }, fail), HEARTBEAT_MS);
 
     // Parse one stream-json line. Claude-Code-style: assistant messages carry
     // `message.content` (array of {type:"text",text}); the final message has
@@ -189,9 +189,11 @@ function executeQoder(cwd, args, logFile) {
       }
     }
 
-    child.stdout.on("data", (chunk) => {
-      rawStdout += chunk.toString("utf8");
-      buf += chunk.toString("utf8");
+    // One decoder feeds both the line parser and the plain-text fallback, so a
+    // multi-byte character split across chunks reaches each of them intact.
+    function takeText(text) {
+      rawStdout += text;
+      buf += text;
       let nl;
       while ((nl = buf.indexOf("\n")) !== -1) {
         const line = buf.slice(0, nl).replace(/\r$/, "");
@@ -199,25 +201,28 @@ function executeQoder(cwd, args, logFile) {
         if (!line.trim()) continue;
         handleLine(line);
       }
-    });
+    }
 
-    child.stderr.on("data", (chunk) => {
-      const text = chunk.toString();
+    child.stdout.on("data", guard((chunk) => takeText(stdoutText.write(chunk)), fail));
+
+    child.stderr.on("data", guard((chunk) => {
+      const text = stderrText.write(chunk);
       stderrTail = (stderrTail + text).slice(-3000);
       fs.appendFileSync(logFile, text, "utf8");
-    });
+    }, fail));
 
-    child.on("error", (err) => {
+    child.on("error", guard((err) => {
       const hint = err.code === "ENOENT"
         ? "qoder not found on PATH — install Qoder: https://qoder.com (ensure `qoder` is on PATH)"
         : err.message;
       appendLog(logFile, `Spawn error: ${hint}`);
       finish({ status: "failed", errorMessage: hint, sessionId: null, rawOutput: "" });
-    });
+    }, fail));
 
-    child.on("close", (code, signal) => {
+    child.on("close", guard((code, signal) => {
       if (settled) return;
       // Flush any trailing buffered line.
+      takeText(stdoutText.end());
       if (buf.trim()) handleLine(buf.trim());
       const msg = code === null ? `signal ${signal}` : `exit ${code}`;
 
@@ -277,134 +282,13 @@ function executeQoder(cwd, args, logFile) {
       } else {
         finish({ status: "failed", errorMessage: stderrTail.trim() || msg, sessionId, rawOutput: "" });
       }
-    });
+    }, fail));
   });
 }
 
-async function runForeground(cwd, args) {
-  const jobId = generateJobId(args.kind);
-  const logFile = resolveJobLogFile(cwd, jobId);
-  const sessionId = args.sessionId || process.env.CODEX_TOOLKIT_SESSION_ID || null;
-  const deadlineAt = new Date(Date.now() + args.timeoutMs).toISOString();
-
-  upsertJob(cwd, {
-    id: jobId, kind: args.kind, status: "running",
-    summary: args.summary || `${args.kind} task`,
-    sessionId, pid: process.pid,
-    startedAt: new Date().toISOString(), deadlineAt, logFile,
-  });
-  appendLog(logFile, `Starting ${args.kind} task (foreground, backend=qoder/print)`);
-
-  const result = await executeQoder(cwd, args, logFile);
-
-  upsertJob(cwd, {
-    id: jobId, status: result.status,
-    threadId: result.sessionId || null,
-    completedAt: new Date().toISOString(),
-    ...(result.errorMessage ? { errorMessage: result.errorMessage } : {}),
-  });
-  writeJobFile(cwd, jobId, {
-    rawOutput: result.rawOutput || "",
-    threadId: result.sessionId || null,
-    ...(result.errorMessage ? { error: result.errorMessage } : {}),
-  });
-
-  const output = {
-    jobId, status: result.status,
-    threadId: result.sessionId || null,
-    rawOutput: result.rawOutput || "",
-    ...(result.errorMessage ? { error: result.errorMessage } : {}),
-  };
-  process.stdout.write(JSON.stringify(output) + "\n");
-  if (result.status !== "completed") process.exitCode = 1;
-}
-
-function runBackground(cwd, args) {
-  const jobId = generateJobId(args.kind);
-  const logFile = resolveJobLogFile(cwd, jobId);
-  const sessionId = args.sessionId || process.env.CODEX_TOOLKIT_SESSION_ID || null;
-
-  upsertJob(cwd, {
-    id: jobId, kind: args.kind, status: "queued",
-    summary: args.summary || `${args.kind} task`, sessionId, logFile,
-  });
-  appendLog(logFile, `Queued ${args.kind} task (background, backend=qoder/print)`);
-
-  const childArgv = [
-    fileURLToPath(import.meta.url),
-    "--kind", args.kind,
-    "--model", args.model || "",
-    "--effort", args.effort || "",
-    "--sandbox", args.sandbox,
-    "--timeout-ms", String(args.timeoutMs),
-    "--session-id", sessionId || "",
-    "--summary", args.summary || "",
-  ];
-  if (args.resume) childArgv.push("--resume", args.resume);
-  childArgv.push("--", args.prompt);
-
-  const child = spawn(process.execPath, childArgv, {
-    cwd, detached: true, stdio: "ignore",
-    env: { ...process.env, CODEX_TOOLKIT_BACKGROUND_JOB_ID: jobId },
-  });
-
-  child.on("error", (err) => {
-    appendLog(logFile, `Background spawn error: ${err.message}`);
-    upsertJob(cwd, {
-      id: jobId, status: "failed",
-      errorMessage: `Failed to start background worker: ${err.message}`,
-      completedAt: new Date().toISOString(),
-    });
-  });
-  child.unref();
-
-  process.stdout.write(JSON.stringify({ jobId, status: "queued", message: `Job ${jobId} started in background.` }) + "\n");
-}
-
-async function runBackgroundWorker(cwd, args, jobId) {
-  const logFile = resolveJobLogFile(cwd, jobId);
-  upsertJob(cwd, {
-    id: jobId, status: "running", pid: process.pid,
-    startedAt: new Date().toISOString(),
-    deadlineAt: new Date(Date.now() + args.timeoutMs).toISOString(),
-  });
-  appendLog(logFile, "Background worker started (backend=qoder/print)");
-
-  const result = await executeQoder(cwd, args, logFile);
-
-  upsertJob(cwd, {
-    id: jobId, status: result.status,
-    threadId: result.sessionId || null,
-    completedAt: new Date().toISOString(),
-    ...(result.errorMessage ? { errorMessage: result.errorMessage } : {}),
-  });
-  writeJobFile(cwd, jobId, {
-    rawOutput: result.rawOutput || "",
-    threadId: result.sessionId || null,
-    ...(result.errorMessage ? { error: result.errorMessage } : {}),
-  });
-}
-
-async function main() {
-  const args = parseArgs(process.argv);
-  if (!args.prompt) {
-    process.stderr.write("Error: no prompt provided. Use -- <prompt>\n");
-    process.exit(1);
-  }
-  const cwd = resolveWorkspaceRoot(process.cwd());
-
-  const backgroundJobId = process.env.CODEX_TOOLKIT_BACKGROUND_JOB_ID;
-  if (backgroundJobId) {
-    await runBackgroundWorker(cwd, args, backgroundJobId);
-    return;
-  }
-  if (args.background) runBackground(cwd, args);
-  else await runForeground(cwd, args);
-}
-
-main().catch((error) => {
-  const message = error?.message || String(error);
-  process.stdout.write(JSON.stringify({ status: "failed", error: message }) + "\n");
-  process.stderr.write(`Error: ${message}\n`);
-  process.exitCode = 1;
+runJobMain({
+  args: parseArgs(process.argv),
+  execute: executeQoder,
+  label: "qoder/print",
+  scriptPath: fileURLToPath(import.meta.url),
 });

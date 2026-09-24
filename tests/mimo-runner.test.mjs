@@ -118,6 +118,8 @@ test("mimo: read-only denies by default and a caller's MIMOCODE_PERMISSION canno
   assert.equal(perm.read, "allow");
   assert.equal(perm.edit, undefined);
   assert.equal(perm.bash, undefined);
+  // Read-only is offline: network tools fall under the "*" deny.
+  for (const tool of ["webfetch", "websearch", "codesearch"]) assert.equal(perm[tool], undefined, tool);
   assert.ok(!record.argv.includes("--dangerously-skip-permissions"));
   // Unknown sandbox levels fall to read-only.
   assert.equal(JSON.parse(runMimo({ flags: ["--sandbox", "bogus"] }).record.permission)["*"], "deny");

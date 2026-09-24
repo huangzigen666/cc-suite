@@ -80,8 +80,12 @@ so it's cheap. If `status` is `"ok"`, continue.
 The chosen `--sandbox` level is mapped by the selected backend's runner onto its
 native enforcement (ACP client-side fs/permission callbacks for CodeBuddy and
 Hermes; `--permission-mode` for Qoder; `--mode plan|edit|yolo` for ZCode;
-`MIMOCODE_PERMISSION` rules for MiMo, where read-only removes every write and
-shell tool; the backend default otherwise). Doubao is a chat assistant with no workspace
+`MIMOCODE_PERMISSION` rules for MiMo, where read-only removes every write,
+shell, and network tool (`webfetch`, `websearch`, `codesearch`); the backend
+default otherwise). MiMo read-only is offline on purpose — a review cannot
+send workspace content to an arbitrary URL. That narrows exfiltration, it does
+not prevent it: the model request itself carries whatever the backend reads.
+For research that needs the network, use `workspace-write`. Doubao is a chat assistant with no workspace
 access, so every level behaves the same there — only the prompt text leaves the
 machine. The mapping is handled inside the runner — you only pick the level:
 

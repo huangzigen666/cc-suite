@@ -42,11 +42,12 @@ import { spawn } from "node:child_process";
 import {
   claimJob,
   generateJobId,
+  finalizeJob,
   upsertJob,
-  writeJobFile,
   createJobLogFile,
 } from "./lib/state.mjs";
 import { resolveWorkspaceRoot } from "./lib/workspace.mjs";
+import { createTextDecoder, finalizedOutcome } from "./lib/runner-lifecycle.mjs";
 import {
   installChildSignalForwarding,
   readProcessStartTime,
@@ -207,6 +208,8 @@ function executeGrok(cwd, args, logFile) {
     const pending = new Map();
     let nextId = 1;
     let buf = "";
+    const stdoutText = createTextDecoder();
+    const stderrText = createTextDecoder();
     let stderrTail = "";
     const answer = [];
     let toolCalls = 0;
@@ -307,7 +310,7 @@ function executeGrok(cwd, args, logFile) {
 
     // ── ACP message dispatch (newline-delimited JSON-RPC) ────────────────────
     child.stdout.on("data", guarded((chunk) => {
-      buf += chunk.toString("utf8");
+      buf += stdoutText.write(chunk);
       let nl;
       while ((nl = buf.indexOf("\n")) !== -1) {
         const line = buf.slice(0, nl).replace(/\r$/, "");
@@ -400,7 +403,7 @@ function executeGrok(cwd, args, logFile) {
     }
 
     child.stderr.on("data", guarded((chunk) => {
-      const text = chunk.toString();
+      const text = stderrText.write(chunk);
       stderrTail = (stderrTail + text).slice(-2000);
       fs.appendFileSync(logFile, text, "utf8");
     }));
@@ -612,29 +615,29 @@ async function runForeground(cwd, args) {
 
   const result = await executeGrok(cwd, args, logFile);
 
-  upsertJob(cwd, {
-    id: jobId, status: result.status,
+  const finalized = finalizeJob(cwd, jobId, {
+    status: result.status,
     threadId: result.sessionId || null,
     completedAt: new Date().toISOString(),
     ...(result.errorMessage ? { errorMessage: result.errorMessage } : {}),
-  });
-  writeJobFile(cwd, jobId, {
+  }, {
     rawOutput: result.rawOutput || "",
     threadId: result.sessionId || null,
     ...(typeof result.resumed === "boolean" ? { resumed: result.resumed } : {}),
     ...(result.errorMessage ? { error: result.errorMessage } : {}),
   });
+  const outcome = finalizedOutcome(finalized, result);
 
   const output = {
-    jobId, status: result.status,
+    jobId, status: outcome.status,
     threadId: result.sessionId || null,
-    rawOutput: result.rawOutput || "",
+    rawOutput: outcome.rawOutput,
     ...(typeof result.resumed === "boolean" ? { resumed: result.resumed } : {}),
-    ...(result.errorMessage ? { error: result.errorMessage } : {}),
+    ...(outcome.errorMessage ? { error: outcome.errorMessage } : {}),
   };
   activeJobId = null; // job state and result are fully persisted
   process.stdout.write(JSON.stringify(output) + "\n");
-  if (result.status !== "completed") process.exitCode = 1;
+  if (outcome.status !== "completed") process.exitCode = 1;
 }
 
 function runBackground(cwd, args) {
@@ -671,8 +674,8 @@ function runBackground(cwd, args) {
   // fast worker completion can never be overwritten with `running` here.
   child.on("error", (err) => {
     appendLog(logFile, `Background spawn error: ${err.message}`);
-    upsertJob(cwd, {
-      id: jobId, status: "failed",
+    finalizeJob(cwd, jobId, {
+      status: "failed",
       errorMessage: `Failed to start background worker: ${err.message}`,
       completedAt: new Date().toISOString(),
     });
@@ -700,13 +703,12 @@ async function runBackgroundWorker(cwd, args, jobId) {
 
   const result = await executeGrok(cwd, args, logFile);
 
-  upsertJob(cwd, {
-    id: jobId, status: result.status,
+  finalizeJob(cwd, jobId, {
+    status: result.status,
     threadId: result.sessionId || null,
     completedAt: new Date().toISOString(),
     ...(result.errorMessage ? { errorMessage: result.errorMessage } : {}),
-  });
-  writeJobFile(cwd, jobId, {
+  }, {
     rawOutput: result.rawOutput || "",
     threadId: result.sessionId || null,
     ...(typeof result.resumed === "boolean" ? { resumed: result.resumed } : {}),
@@ -744,21 +746,24 @@ main().catch((error) => {
   // spawn-parent crash finalizes whatever job this process registered but had
   // not yet brought to a terminal state.
   const jobId = process.env.CODEX_TOOLKIT_BACKGROUND_JOB_ID || activeJobId || null;
+  let status = "failed";
   if (jobId) {
     try {
-      upsertJob(resolveWorkspaceRoot(process.cwd()), {
-        id: jobId,
+      const finalized = finalizeJob(resolveWorkspaceRoot(process.cwd()), jobId, {
         status: "failed",
         errorMessage: message,
         completedAt: new Date().toISOString(),
       });
+      // A job cancelled before the crash stays cancelled; report that, not
+      // a failure the state file does not hold.
+      if (!finalized.committed && finalized.status) status = finalized.status;
     } catch {
       // State unreachable — the structured output below is the only signal.
     }
   }
   process.stdout.write(JSON.stringify({
     jobId,
-    status: "failed",
+    status,
     error: message,
   }) + "\n");
   process.stderr.write(`Error: ${message}\n`);

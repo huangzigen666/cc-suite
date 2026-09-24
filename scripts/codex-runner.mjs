@@ -25,11 +25,12 @@ import { spawn } from "node:child_process";
 import {
   claimJob,
   generateJobId,
+  finalizeJob,
   upsertJob,
-  writeJobFile,
   createJobLogFile,
 } from "./lib/state.mjs";
 import { resolveWorkspaceRoot } from "./lib/workspace.mjs";
+import { createTextDecoder, finalizedOutcome } from "./lib/runner-lifecycle.mjs";
 import {
   installChildSignalForwarding,
   readProcessStartTime,
@@ -194,6 +195,8 @@ function executeCodex(cwd, args, logFile) {
     const startedAt = Date.now();
     let threadId = null;
     let stdoutBuf = "";
+    const stdoutText = createTextDecoder();
+    const stderrText = createTextDecoder();
     let stderrTail = "";
     let errorEvent = null; // highest-ranked error seen on the JSONL stream
     let settled = false;
@@ -303,7 +306,7 @@ function executeCodex(cwd, args, logFile) {
     child.stdout.on(
       "data",
       guarded((chunk) => {
-        stdoutBuf += chunk.toString();
+        stdoutBuf += stdoutText.write(chunk);
         let nl;
         while ((nl = stdoutBuf.indexOf("\n")) !== -1) {
           processLine(stdoutBuf.slice(0, nl));
@@ -315,7 +318,7 @@ function executeCodex(cwd, args, logFile) {
     child.stderr.on(
       "data",
       guarded((chunk) => {
-        const text = chunk.toString();
+        const text = stderrText.write(chunk);
         stderrTail = (stderrTail + text).slice(-2000);
         fs.appendFileSync(logFile, text, "utf8");
       })
@@ -329,6 +332,7 @@ function executeCodex(cwd, args, logFile) {
     });
 
     child.on("close", guarded((code, signal) => {
+      stdoutBuf += stdoutText.end();
       if (stdoutBuf.trim()) processLine(stdoutBuf); // flush a final unterminated line
       stdoutBuf = "";
       const rawOutput = readLastMessage(lastMessageFile);
@@ -385,29 +389,28 @@ async function runForeground(cwd, args) {
 
   const result = await executeCodex(cwd, args, logFile);
 
-  upsertJob(cwd, {
-    id: jobId,
+  const finalized = finalizeJob(cwd, jobId, {
     status: result.status,
     threadId: result.threadId || null,
     completedAt: new Date().toISOString(),
     ...(result.errorMessage ? { errorMessage: result.errorMessage } : {}),
-  });
-  writeJobFile(cwd, jobId, {
+  }, {
     rawOutput: result.rawOutput || "",
     threadId: result.threadId || null,
     ...(result.errorMessage ? { error: result.errorMessage } : {}),
   });
+  const outcome = finalizedOutcome(finalized, result);
   activeJobId = null; // job state and result are fully persisted
 
   const output = {
     jobId,
-    status: result.status,
+    status: outcome.status,
     threadId: result.threadId || null,
-    rawOutput: result.rawOutput || "",
-    ...(result.errorMessage ? { error: result.errorMessage } : {}),
+    rawOutput: outcome.rawOutput,
+    ...(outcome.errorMessage ? { error: outcome.errorMessage } : {}),
   };
   process.stdout.write(JSON.stringify(output) + "\n");
-  if (result.status !== "completed") process.exitCode = 1;
+  if (outcome.status !== "completed") process.exitCode = 1;
 }
 
 function runBackground(cwd, args) {
@@ -454,8 +457,7 @@ function runBackground(cwd, args) {
   // fast worker completion can never be overwritten with `running` here.
   child.on("error", (err) => {
     appendLog(logFile, `Background spawn error: ${err.message}`);
-    upsertJob(cwd, {
-      id: jobId,
+    finalizeJob(cwd, jobId, {
       status: "failed",
       errorMessage: `Failed to start background worker: ${err.message}`,
       completedAt: new Date().toISOString(),
@@ -489,14 +491,12 @@ async function runBackgroundWorker(cwd, args, jobId) {
 
   const result = await executeCodex(cwd, args, logFile);
 
-  upsertJob(cwd, {
-    id: jobId,
+  finalizeJob(cwd, jobId, {
     status: result.status,
     threadId: result.threadId || null,
     completedAt: new Date().toISOString(),
     ...(result.errorMessage ? { errorMessage: result.errorMessage } : {}),
-  });
-  writeJobFile(cwd, jobId, {
+  }, {
     rawOutput: result.rawOutput || "",
     threadId: result.threadId || null,
     ...(result.errorMessage ? { error: result.errorMessage } : {}),
@@ -533,21 +533,24 @@ main().catch((error) => {
   // spawn-parent crash finalizes whatever job this process registered but had
   // not yet brought to a terminal state.
   const jobId = process.env.CODEX_TOOLKIT_BACKGROUND_JOB_ID || activeJobId || null;
+  let status = "failed";
   if (jobId) {
     try {
-      upsertJob(resolveWorkspaceRoot(process.cwd()), {
-        id: jobId,
+      const finalized = finalizeJob(resolveWorkspaceRoot(process.cwd()), jobId, {
         status: "failed",
         errorMessage: message,
         completedAt: new Date().toISOString(),
       });
+      // A job cancelled before the crash stays cancelled; report that, not
+      // a failure the state file does not hold.
+      if (!finalized.committed && finalized.status) status = finalized.status;
     } catch {
       // State unreachable — the structured output below is the only signal.
     }
   }
   process.stdout.write(JSON.stringify({
     jobId,
-    status: "failed",
+    status,
     error: message,
   }) + "\n");
   process.stderr.write(`Error: ${message}\n`);

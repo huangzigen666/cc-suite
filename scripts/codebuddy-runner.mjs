@@ -38,20 +38,18 @@ import fs from "node:fs";
 import path from "node:path";
 import process from "node:process";
 import { fileURLToPath } from "node:url";
-import { spawn } from "node:child_process";
 
-import {
-  generateJobId,
-  upsertJob,
-  writeJobFile,
-  resolveJobLogFile,
-} from "./lib/state.mjs";
-import { resolveWorkspaceRoot } from "./lib/workspace.mjs";
 import { withDelegationBoundary } from "./lib/delegation-boundary.mjs";
+import { appendLog, runJobMain } from "./lib/job-runner.mjs";
+import {
+  createTextDecoder,
+  guard,
+  spawnBackend,
+  superviseBackend,
+} from "./lib/runner-lifecycle.mjs";
 
 const DEFAULT_TIMEOUT_MS = 15 * 60 * 1000; // 15 minutes — matches the other runners
 const HEARTBEAT_MS = 30 * 1000;
-const SIGKILL_GRACE_MS = 5 * 1000;
 // ACP defines protocolVersion as a number, not a string; strict agents reject
 // a string at initialize. Verified live against `codebuddy --acp`: the
 // handshake only completes when protocolVersion is the integer 1.
@@ -97,10 +95,6 @@ function parseArgs(argv) {
   return args;
 }
 
-function appendLog(logFile, message) {
-  fs.appendFileSync(logFile, `[${new Date().toISOString()}] ${message}\n`, "utf8");
-}
-
 // Build the `codebuddy --acp` argv. CodeBuddy is launched directly in ACP
 // server mode; the runner is the client. We forward an optional --model so the
 // caller can pin a model, but we do NOT pass a permission flag — the sandbox is
@@ -137,13 +131,16 @@ function executeCodebuddy(cwd, args, logFile) {
     appendLog(logFile, `Model: ${args.model || "(default)"}, Effort: ${args.effort || "(default)"}, Sandbox: ${args.sandbox}${args.resume ? ` (resuming ${args.resume})` : ""}`);
     appendLog(logFile, `Deadline: ${Math.round(args.timeoutMs / 1000)}s`);
 
-    const child = spawn("codebuddy", cbArgs, {
+    const { child, release } = spawnBackend("codebuddy", cbArgs, {
       cwd,
-      stdio: ["pipe", "pipe", "pipe"], // stdin: JSON-RPC out, stdout: JSON-RPC in
+      stdin: "pipe", // stdin: JSON-RPC out, stdout: JSON-RPC in
       env: { ...process.env },
     });
 
     const startedAt = Date.now();
+    const stdoutText = createTextDecoder();
+    const stderrText = createTextDecoder();
+    let heartbeat = null;
     const pending = new Map();
     let nextId = 1;
     let buf = "";
@@ -167,27 +164,51 @@ function executeCodebuddy(cwd, args, logFile) {
     const respond = (id, result) => send({ jsonrpc: "2.0", id, result });
     const respondErr = (id, message) => send({ jsonrpc: "2.0", id, error: { code: -32601, message } });
 
-    const heartbeat = setInterval(() => {
-      appendLog(logFile, `…still running (${Math.round((Date.now() - startedAt) / 1000)}s elapsed, ${toolCalls} tool call(s))`);
-    }, HEARTBEAT_MS);
+    // The agent pipe can fail asynchronously (EPIPE after the agent died); an
+    // unhandled stream error would crash the runner and strand the job.
+    child.stdin.on("error", (err) => {
+      rejectAllPending(new Error(`codebuddy stdin closed: ${err.message}`));
+    });
 
-    const deadline = setTimeout(() => {
-      timedOut = true;
-      appendLog(logFile, `Deadline exceeded (${Math.round(args.timeoutMs / 1000)}s) — cancelling and terminating`);
-      if (acpSessionId) send({ jsonrpc: "2.0", method: "session/cancel", params: { sessionId: acpSessionId } });
-      child.kill("SIGTERM");
-      setTimeout(() => { if (!settled) child.kill("SIGKILL"); }, SIGKILL_GRACE_MS);
-    }, args.timeoutMs);
+    function rejectAllPending(reason) {
+      for (const [, p] of pending) p.rej(reason);
+      pending.clear();
+    }
+
+    const supervisor = superviseBackend(child, {
+      timeoutMs: args.timeoutMs,
+      release,
+      onError: (error) => fail(error),
+      onDeadline: () => {
+        timedOut = true;
+        appendLog(logFile, `Deadline exceeded (${Math.round(args.timeoutMs / 1000)}s) — cancelling and terminating`);
+        if (acpSessionId) send({ jsonrpc: "2.0", method: "session/cancel", params: { sessionId: acpSessionId } });
+      },
+      onDrain: () => appendLog(logFile, "codebuddy exited but its output pipes stayed open — terminating leftover processes"),
+    });
+
+    heartbeat = setInterval(guard(() => {
+      appendLog(logFile, `…still running (${Math.round((Date.now() - startedAt) / 1000)}s elapsed, ${toolCalls} tool call(s))`);
+    }, (error) => fail(error)), HEARTBEAT_MS);
 
     function finish(result) {
       if (settled) return;
       settled = true;
       clearInterval(heartbeat);
-      clearTimeout(deadline);
-      try { child.kill(); } catch { /* already dead */ }
+      supervisor.dispose();
+      rejectAllPending(new Error("runner settled"));
       // When a resume was requested, report explicitly whether it held; a
       // silent fresh-session fallback must not masquerade as continuation.
       resolve(args.resume ? { ...result, resumed: !resumeFellBack } : result);
+    }
+
+    function fail(error) {
+      finish({
+        status: "failed",
+        errorMessage: `Runner callback failed: ${error?.message || error}`,
+        sessionId: acpSessionId,
+        rawOutput: answer.join("").trim(),
+      });
     }
 
     // session/prompt resolving does not mean the streamed answer has fully
@@ -204,8 +225,8 @@ function executeCodebuddy(cwd, args, logFile) {
     }
 
     // ── ACP message dispatch (newline-delimited JSON-RPC) ────────────────────
-    child.stdout.on("data", (chunk) => {
-      buf += chunk.toString("utf8");
+    child.stdout.on("data", guard((chunk) => {
+      buf += stdoutText.write(chunk);
       let nl;
       while ((nl = buf.indexOf("\n")) !== -1) {
         const line = buf.slice(0, nl).replace(/\r$/, "");
@@ -223,7 +244,7 @@ function executeCodebuddy(cwd, args, logFile) {
           handleNotification(m);
         }
       }
-    });
+    }, fail));
 
     function handleNotification(m) {
       if (m.method !== "session/update") return;
@@ -283,21 +304,21 @@ function executeCodebuddy(cwd, args, logFile) {
       }
     }
 
-    child.stderr.on("data", (chunk) => {
-      const text = chunk.toString();
+    child.stderr.on("data", guard((chunk) => {
+      const text = stderrText.write(chunk);
       stderrTail = (stderrTail + text).slice(-2000);
       fs.appendFileSync(logFile, text, "utf8");
-    });
+    }, fail));
 
-    child.on("error", (err) => {
+    child.on("error", guard((err) => {
       const hint = err.code === "ENOENT"
         ? "codebuddy not found on PATH — install the CodeBuddy CLI and ensure `codebuddy` is on PATH"
         : err.message;
       appendLog(logFile, `Spawn error: ${hint}`);
       finish({ status: "failed", errorMessage: hint, sessionId: null, rawOutput: "" });
-    });
+    }, fail));
 
-    child.on("close", (code, signal) => {
+    child.on("close", guard((code, signal) => {
       childClosed = true;
       if (settled) return;
       const rawOutput = answer.join("").trim();
@@ -325,7 +346,7 @@ function executeCodebuddy(cwd, args, logFile) {
           rawOutput,
         });
       }
-    });
+    }, fail));
 
     // ── ACP conversation ─────────────────────────────────────────────────────
     (async () => {
@@ -446,135 +467,9 @@ function executeCodebuddy(cwd, args, logFile) {
   });
 }
 
-async function runForeground(cwd, args) {
-  const jobId = generateJobId(args.kind);
-  const logFile = resolveJobLogFile(cwd, jobId);
-  const sessionId = args.sessionId || process.env.CODEX_TOOLKIT_SESSION_ID || null;
-  const deadlineAt = new Date(Date.now() + args.timeoutMs).toISOString();
-
-  upsertJob(cwd, {
-    id: jobId, kind: args.kind, status: "running",
-    summary: args.summary || `${args.kind} task`,
-    sessionId, pid: process.pid,
-    startedAt: new Date().toISOString(), deadlineAt, logFile,
-  });
-  appendLog(logFile, `Starting ${args.kind} task (foreground, backend=codebuddy/ACP)`);
-
-  const result = await executeCodebuddy(cwd, args, logFile);
-
-  upsertJob(cwd, {
-    id: jobId, status: result.status,
-    threadId: result.sessionId || null,
-    completedAt: new Date().toISOString(),
-    ...(result.errorMessage ? { errorMessage: result.errorMessage } : {}),
-  });
-  writeJobFile(cwd, jobId, {
-    rawOutput: result.rawOutput || "",
-    threadId: result.sessionId || null,
-    ...(typeof result.resumed === "boolean" ? { resumed: result.resumed } : {}),
-    ...(result.errorMessage ? { error: result.errorMessage } : {}),
-  });
-
-  const output = {
-    jobId, status: result.status,
-    threadId: result.sessionId || null,
-    rawOutput: result.rawOutput || "",
-    ...(typeof result.resumed === "boolean" ? { resumed: result.resumed } : {}),
-    ...(result.errorMessage ? { error: result.errorMessage } : {}),
-  };
-  process.stdout.write(JSON.stringify(output) + "\n");
-  if (result.status !== "completed") process.exitCode = 1;
-}
-
-function runBackground(cwd, args) {
-  const jobId = generateJobId(args.kind);
-  const logFile = resolveJobLogFile(cwd, jobId);
-  const sessionId = args.sessionId || process.env.CODEX_TOOLKIT_SESSION_ID || null;
-
-  upsertJob(cwd, {
-    id: jobId, kind: args.kind, status: "queued",
-    summary: args.summary || `${args.kind} task`, sessionId, logFile,
-  });
-  appendLog(logFile, `Queued ${args.kind} task (background, backend=codebuddy/ACP)`);
-
-  const childArgv = [
-    fileURLToPath(import.meta.url),
-    "--kind", args.kind,
-    "--model", args.model || "",
-    "--effort", args.effort || "",
-    "--sandbox", args.sandbox,
-    "--timeout-ms", String(args.timeoutMs),
-    "--session-id", sessionId || "",
-    "--summary", args.summary || "",
-  ];
-  if (args.resume) childArgv.push("--resume", args.resume);
-  childArgv.push("--", args.prompt);
-
-  const child = spawn(process.execPath, childArgv, {
-    cwd, detached: true, stdio: "ignore",
-    env: { ...process.env, CODEX_TOOLKIT_BACKGROUND_JOB_ID: jobId },
-  });
-
-  // The worker records the running transition itself (with its own pid), so a
-  // fast worker completion can never be overwritten with `running` here.
-  child.on("error", (err) => {
-    appendLog(logFile, `Background spawn error: ${err.message}`);
-    upsertJob(cwd, {
-      id: jobId, status: "failed",
-      errorMessage: `Failed to start background worker: ${err.message}`,
-      completedAt: new Date().toISOString(),
-    });
-  });
-  child.unref();
-
-  process.stdout.write(JSON.stringify({ jobId, status: "queued", message: `Job ${jobId} started in background.` }) + "\n");
-}
-
-async function runBackgroundWorker(cwd, args, jobId) {
-  const logFile = resolveJobLogFile(cwd, jobId);
-  upsertJob(cwd, {
-    id: jobId, status: "running", pid: process.pid,
-    startedAt: new Date().toISOString(),
-    deadlineAt: new Date(Date.now() + args.timeoutMs).toISOString(),
-  });
-  appendLog(logFile, "Background worker started (backend=codebuddy/ACP)");
-
-  const result = await executeCodebuddy(cwd, args, logFile);
-
-  upsertJob(cwd, {
-    id: jobId, status: result.status,
-    threadId: result.sessionId || null,
-    completedAt: new Date().toISOString(),
-    ...(result.errorMessage ? { errorMessage: result.errorMessage } : {}),
-  });
-  writeJobFile(cwd, jobId, {
-    rawOutput: result.rawOutput || "",
-    threadId: result.sessionId || null,
-    ...(typeof result.resumed === "boolean" ? { resumed: result.resumed } : {}),
-    ...(result.errorMessage ? { error: result.errorMessage } : {}),
-  });
-}
-
-async function main() {
-  const args = parseArgs(process.argv);
-  if (!args.prompt) {
-    process.stderr.write("Error: no prompt provided. Use -- <prompt>\n");
-    process.exit(1);
-  }
-  const cwd = resolveWorkspaceRoot(process.cwd());
-
-  const backgroundJobId = process.env.CODEX_TOOLKIT_BACKGROUND_JOB_ID;
-  if (backgroundJobId) {
-    await runBackgroundWorker(cwd, args, backgroundJobId);
-    return;
-  }
-  if (args.background) runBackground(cwd, args);
-  else await runForeground(cwd, args);
-}
-
-main().catch((error) => {
-  const message = error?.message || String(error);
-  process.stdout.write(JSON.stringify({ status: "failed", error: message }) + "\n");
-  process.stderr.write(`Error: ${message}\n`);
-  process.exitCode = 1;
+runJobMain({
+  args: parseArgs(process.argv),
+  execute: executeCodebuddy,
+  label: "codebuddy/ACP",
+  scriptPath: fileURLToPath(import.meta.url),
 });

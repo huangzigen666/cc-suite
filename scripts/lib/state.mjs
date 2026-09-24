@@ -418,6 +418,64 @@ export function claimJob(cwd, jobId, patch, { unless = ["cancelled"] } = {}) {
   return claimed;
 }
 
+// Commit a job's terminal patch and its result file under the state lock,
+// unless the job's current status is in `unless` or its record is gone. A job
+// cancelled while its backend ran must stay cancelled: an unconditional
+// upsertJob here turned a cancel into `completed`. The result file is written
+// inside the same lock so a concurrent cancel cannot land between the two.
+//
+// Persistence failures keep the three records consistent:
+//   - result file unwritable → the job is committed as `failed` naming that
+//     error, never as the backend's `completed` with no result behind it;
+//   - state save fails after the result file was written → the result file is
+//     removed again before the error propagates, so a caller's failure commit
+//     cannot end up paired with a success payload.
+// Returns { committed, status, resultFileError? } where status is what the
+// record now holds.
+export function finalizeJob(cwd, jobId, patch, payload = null, { unless = ["cancelled"] } = {}) {
+  assertValidJobId(jobId);
+  let outcome = { committed: false, status: null };
+  let wroteResultFile = false;
+  try {
+    updateState(cwd, (state) => {
+      const idx = state.jobs.findIndex((j) => j.id === jobId);
+      if (idx === -1) return;
+      const current = state.jobs[idx];
+      if (unless.includes(current.status)) {
+        outcome = { committed: false, status: current.status };
+        return;
+      }
+      let effective = patch;
+      let resultFileError = null;
+      if (payload) {
+        try {
+          writeJobFile(cwd, jobId, payload);
+          wroteResultFile = true;
+        } catch (error) {
+          resultFileError = error?.message || String(error);
+          effective = {
+            ...patch,
+            status: "failed",
+            errorMessage: `result file could not be written: ${resultFileError}`,
+          };
+        }
+      }
+      state.jobs[idx] = { ...current, ...effective, updatedAt: nowIso() };
+      outcome = {
+        committed: true,
+        status: effective.status ?? current.status,
+        ...(resultFileError ? { resultFileError } : {}),
+      };
+    });
+  } catch (error) {
+    if (wroteResultFile) {
+      try { removeJobFile(resolveJobFile(cwd, jobId)); } catch { /* best effort */ }
+    }
+    throw error;
+  }
+  return outcome;
+}
+
 export function setConfig(cwd, key, value) {
   return updateState(cwd, (state) => {
     state.config = { ...state.config, [key]: value };
