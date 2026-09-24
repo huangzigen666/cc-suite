@@ -11,7 +11,7 @@
       "name": "cc-suite",
       "description": "Fork of cc-suite: bridge and delegate across Claude Code, Codex CLI, Antigravity (agy), Grok Build, CodeBuddy, Hermes, Qoder and Qwen Code. 2.1.1 is a packaging release (this marketplace manifest); 2.1.0 enforced the read-only sandbox for the ACP lanes, reports a client denial as a distinct 'blocked' status instead of 'stalled', and fixed a close-handler race that could report a cancelled or refused turn as completed.",
       "source": "./",
-      "version": "2.4.0",
+      "version": "2.5.0",
       "author": {
         "name": "xiaolai"
       },
