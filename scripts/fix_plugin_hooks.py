@@ -38,12 +38,14 @@ def apply(path: pathlib.Path) -> str:
         text = text.rstrip("\n") + ("\n\n" if text.strip() else "") + "[features]\nplugin_hooks = true\n"
     # A regex edit is only safe when its result can be semantically checked, so
     # an unavailable parser is a refusal, not a silent write.
+    # ImportError, not just ModuleNotFoundError: a parser that is present but
+    # unimportable must also end in this refusal, not an unhandled traceback.
     try:
         import tomllib
-    except ModuleNotFoundError:
+    except ImportError:
         try:
             import tomli as tomllib  # type: ignore[no-redef]
-        except ModuleNotFoundError:
+        except ImportError:
             sys.exit(
                 f"cannot validate the edited TOML on Python {sys.version_info.major}."
                 f"{sys.version_info.minor} (no tomllib, no tomli) — refusing to write; "

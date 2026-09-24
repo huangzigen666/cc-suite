@@ -24,6 +24,29 @@ fi
 ok_msg()   { PASS=$((PASS + 1)); printf "${G}  ✓${N} %s\n" "$*"; }
 fail_msg() { FAIL=$((FAIL + 1)); ERRORS+=("$*"); printf "${R}  ✗${N} %s\n" "$*"; }
 section()  { printf "\n${B}%s${N}\n" "$*"; }
+# An assertion the environment cannot evaluate is counted and reported as a
+# skip — never folded into a pass, never misreported as a product failure.
+SKIP=0
+SKIPPED=()
+skip_msg() { SKIP=$((SKIP + 1)); SKIPPED+=("$*"); printf "${B}  · SKIP %s${N}\n" "$*"; }
+
+# A Python that can parse TOML: tomllib is 3.11+, tomli backports it. macOS
+# ships 3.9 as python3, so the first python3 on PATH may have neither. Scripts
+# that validate TOML fail closed without a parser, and the TOML assertions here
+# need one too — they use TOML_PY, or skip when there is none. The probe
+# actually imports the parser: a module that exists but is broken must not win.
+TOML_PY=""
+for _py in python3 python3.13 python3.12 python3.11; do
+  if command -v "$_py" >/dev/null 2>&1 &&
+     "$_py" -c '
+try:
+    import tomllib
+except ImportError:
+    import tomli
+tomllib_ok = True' 2>/dev/null; then
+    TOML_PY="$_py"; break
+  fi
+done
 
 assert_file() {
   if [ -f "$1" ]; then ok_msg "file exists: $1"
@@ -1859,7 +1882,19 @@ cleanup
 section "T54c: unbridge.sh — interleaved/nested sentinels fail closed, separate ones strip cleanly"
 
 toml_is_valid() {
-  python3 -c "import tomllib,sys; tomllib.load(open(sys.argv[1],'rb'))" "$1" 2>/dev/null
+  "$TOML_PY" -c "
+import sys
+try:
+    import tomllib
+except ImportError:
+    import tomli as tomllib
+tomllib.load(open(sys.argv[1], 'rb'))" "$1" 2>/dev/null
+}
+# assert_toml_valid <file> <label>: pass/fail on parse, skip without a parser.
+assert_toml_valid() {
+  if [ -z "$TOML_PY" ]; then skip_msg "$2: no Python with tomllib/tomli to parse TOML"
+  elif toml_is_valid "$1"; then ok_msg "$2: config.toml still parses as TOML"
+  else fail_msg "$2: config.toml was corrupted"; fi
 }
 
 # (a) interleaved markers — must refuse and leave the file valid and intact
@@ -1881,8 +1916,7 @@ z = 1
 TOML
 cp .codex/config.toml expected.toml
 assert_exit_nonzero bash "$SCRIPTS/unbridge.sh"
-if toml_is_valid .codex/config.toml; then ok_msg "interleaved: config.toml still parses as TOML"
-else fail_msg "interleaved: config.toml was corrupted"; fi
+assert_toml_valid .codex/config.toml "interleaved"
 if cmp -s .codex/config.toml expected.toml; then ok_msg "interleaved: config.toml left byte-identical"
 else fail_msg "interleaved: config.toml was rewritten"; fi
 cleanup
@@ -1902,8 +1936,7 @@ y = 2
 zzz = "LASTCHAR"' > .codex/config.toml
 cp .codex/config.toml expected.toml
 assert_exit_nonzero bash "$SCRIPTS/unbridge.sh"
-if toml_is_valid .codex/config.toml; then ok_msg "nested: config.toml still parses as TOML"
-else fail_msg "nested: config.toml was corrupted"; fi
+assert_toml_valid .codex/config.toml "nested"
 if cmp -s .codex/config.toml expected.toml; then ok_msg "nested: config.toml left byte-identical"
 else fail_msg "nested: final byte dropped or file rewritten"; fi
 cleanup
@@ -1926,8 +1959,7 @@ y = 2
 z = 1
 TOML
 assert_exit0 bash "$SCRIPTS/unbridge.sh"
-if toml_is_valid .codex/config.toml; then ok_msg "separate: config.toml still parses as TOML"
-else fail_msg "separate: config.toml was corrupted"; fi
+assert_toml_valid .codex/config.toml "separate"
 assert_not_contains ".codex/config.toml" "cc-suite-mcp"
 assert_not_contains ".codex/config.toml" "cc-suite-claude-mcp"
 assert_contains ".codex/config.toml" "[middle]"
@@ -2563,16 +2595,62 @@ section "T77: fix_plugin_hooks.py — replaces, inserts once, leaves other table
 make_tmp
 printf '[features]\nplugin_hooks = false\n[other]\nplugin_hooks = false\n' > cfg.toml
 export FIX="$SCRIPTS/fix_plugin_hooks.py"
-assert_exit0 python3 "$SCRIPTS/fix_plugin_hooks.py" cfg.toml
-python3 - <<'PY' && ok_msg "replaced in [features], [other] untouched, idempotent" || fail_msg "fix_plugin_hooks assertions failed"
-import subprocess, sys, tomllib
+if [ -z "$TOML_PY" ]; then
+  skip_msg "fix_plugin_hooks behaviour: no Python with tomllib/tomli (the fixer refuses without one; see T77b)"
+else
+assert_exit0 "$TOML_PY" "$SCRIPTS/fix_plugin_hooks.py" cfg.toml
+"$TOML_PY" - <<'PY' && ok_msg "replaced in [features], [other] untouched, idempotent" || fail_msg "fix_plugin_hooks assertions failed"
+import subprocess, sys
+try:
+    import tomllib
+except ImportError:
+    import tomli as tomllib
 d = tomllib.load(open("cfg.toml", "rb"))
 assert d["features"]["plugin_hooks"] is True and d["other"]["plugin_hooks"] is False
 subprocess.run([sys.executable, __import__("os").environ["FIX"], "cfg.toml"], check=True, capture_output=True)
 text = open("cfg.toml").read()
 assert text.count("plugin_hooks") == 2  # one per table, no duplicates added
 PY
+fi
 cleanup
+
+# T77b: without a usable TOML parser the fixer must refuse and leave the file
+# untouched — a regex edit it cannot verify is never written. Two ways a parser
+# is unusable, both forced here so this runs on every Python:
+#   absent  — sys.modules blocks the import (ModuleNotFoundError);
+#   broken  — a module that exists but fails to import (plain ImportError, as
+#             from a damaged tomli install). The fixer used to catch only
+#             ModuleNotFoundError and crashed with a traceback on this one.
+section "T77b: fix_plugin_hooks.py — no usable TOML parser means refuse, file unchanged"
+for _mode in absent broken; do
+  make_tmp
+  printf '[features]\nplugin_hooks = false\n' > cfg.toml
+  cp cfg.toml expected.toml
+  if [ "$_mode" = broken ]; then
+    # The working directory is sys.path[0] under `python3 -c`, so these shadow
+    # the stdlib tomllib and any installed tomli.
+    printf 'raise ImportError("cannot import name _parser")\n' > tomllib.py
+    cp tomllib.py tomli.py
+  fi
+  _refuse_out="$(CC_MODE="$_mode" python3 -c '
+import os, runpy, sys
+if os.environ["CC_MODE"] == "absent":
+    sys.modules["tomllib"] = None
+    sys.modules["tomli"] = None
+script = sys.argv[1]
+sys.argv = [script, "cfg.toml"]
+runpy.run_path(script, run_name="__main__")' "$SCRIPTS/fix_plugin_hooks.py" 2>&1)" && _refuse_rc=0 || _refuse_rc=$?
+  if [ "$_refuse_rc" -ne 0 ] && printf '%s' "$_refuse_out" | grep -q 'refusing to write'; then
+    ok_msg "$_mode parser: exits nonzero with a refusal message"
+  else
+    fail_msg "$_mode parser: expected a refusal, got rc=$_refuse_rc: $_refuse_out"
+  fi
+  if printf '%s' "$_refuse_out" | grep -q 'Traceback'; then fail_msg "$_mode parser: crashed with a traceback instead of refusing"
+  else ok_msg "$_mode parser: no traceback"; fi
+  if cmp -s cfg.toml expected.toml; then ok_msg "$_mode parser: cfg.toml left byte-identical"
+  else fail_msg "$_mode parser: cfg.toml was modified"; fi
+  cleanup
+done
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # T75  status.sh — advisor block with the current pin must not mask a stale claude-code pin
@@ -2741,6 +2819,9 @@ echo
 printf '%.0s═' {1..60}
 echo
 printf "${B}Results: ${G}%d passed${N}" "$PASS"
+if [ "$SKIP" -gt 0 ]; then
+  printf ", ${B}%d skipped${N}" "$SKIP"
+fi
 if [ "$FAIL" -gt 0 ]; then
   printf ", ${R}%d FAILED${N}\n" "$FAIL"
   echo
