@@ -2589,6 +2589,99 @@ PY
 cleanup
 
 # ═══════════════════════════════════════════════════════════════════════════════
+# T76f  diagnose.py — plugin_hooks auto-fix runs on a Python that can parse TOML
+# ═══════════════════════════════════════════════════════════════════════════════
+# fix_plugin_hooks.py refuses to write without tomllib/tomli, and diagnose is
+# launched as `python3` — 3.9 on stock macOS. The auto-fix used to be a literal
+# `python3 fix_plugin_hooks.py`, certain to refuse there. diagnose now picks an
+# interpreter that really imports a TOML parser, or offers a manual fix only.
+section "T76f: diagnose.py — plugin_hooks auto-fix uses a TOML-capable Python, or none"
+make_tmp
+mkdir -p fakehome/.codex
+printf '[features]\nother = true\n' > fakehome/.codex/config.toml
+export T76F_SCRIPTS="$SCRIPTS"
+
+# (a) end to end: diagnose on plain python3, then run the auto-fix it offers.
+if [ -z "$TOML_PY" ]; then
+  skip_msg "T76f(a): no Python with tomllib/tomli on this machine to run the auto-fix"
+else
+  if HOME="$TMP/fakehome" python3 - <<'PY'
+import os, subprocess, sys
+sys.path.insert(0, os.environ["T76F_SCRIPTS"])
+import diagnose
+check = next(c for c in diagnose.check_codex_runtime(["codex"]) if c["id"] == "plugin_hooks")
+assert check["status"] == "issue", check
+auto = check["fix"]["auto"]
+assert len(auto) == 1 and "fix_plugin_hooks.py" in auto[0], auto
+subprocess.run(auto[0], shell=True, check=True, capture_output=True)
+PY
+  then ok_msg "auto-fix command offered by diagnose ran successfully"
+  else fail_msg "auto-fix command offered by diagnose failed"; fi
+  if "$TOML_PY" -c '
+import sys
+try:
+    import tomllib
+except ImportError:
+    import tomli as tomllib
+d = tomllib.load(open(sys.argv[1], "rb"))
+assert d["features"]["plugin_hooks"] is True and d["features"]["other"] is True' fakehome/.codex/config.toml; then
+    ok_msg "auto-fix set [features] plugin_hooks = true"
+  else fail_msg "auto-fix did not set plugin_hooks"; fi
+fi
+
+# (b) no usable interpreter: no auto command that would only refuse.
+printf '[features]\nother = true\n' > fakehome/.codex/config.toml
+if HOME="$TMP/fakehome" python3 - <<'PY'
+import os, sys
+sys.path.insert(0, os.environ["T76F_SCRIPTS"])
+import diagnose
+diagnose.toml_python = lambda: None
+check = next(c for c in diagnose.check_codex_runtime(["codex"]) if c["id"] == "plugin_hooks")
+assert check["status"] == "issue", check
+assert not check["fix"].get("auto"), check["fix"]
+assert "Python 3.11" in check["fix"]["manual"], check["fix"]
+PY
+then ok_msg "no TOML-capable Python: manual fix only, no auto command"
+else fail_msg "no TOML-capable Python: an auto command was still offered"; fi
+
+# (c) the real detection, where a parser-less Python exists to run it on.
+_bare_py=""
+for _cand in /usr/bin/python3 python3.9 python3.10; do
+  _p="$(command -v "$_cand" 2>/dev/null || true)"
+  if [ -n "$_p" ] && ! "$_p" -c 'import tomllib' 2>/dev/null && ! "$_p" -c 'import tomli' 2>/dev/null; then
+    _bare_py="$_p"; break
+  fi
+done
+if [ -z "$_bare_py" ]; then
+  skip_msg "T76f(c): no parser-less Python on this machine to exercise negative detection"
+else
+  mkdir -p emptybin
+  if PATH="$TMP/emptybin" "$_bare_py" -c '
+import os, sys
+sys.path.insert(0, os.environ["T76F_SCRIPTS"])
+import diagnose
+assert diagnose.toml_python() is None, diagnose.toml_python()' 2>/dev/null; then
+    ok_msg "detection returns nothing when only a parser-less Python is available"
+  else fail_msg "detection picked an interpreter that cannot import a TOML parser"; fi
+fi
+
+# (d) a non-Python host as sys.executable that exits 0 on anything must not be
+# picked: only an interpreter that prints the probe's marker counts.
+if [ -n "$_bare_py" ] && [ -x /usr/bin/true ]; then
+  if PATH="$TMP/emptybin" "$_bare_py" -c '
+import os, sys
+sys.path.insert(0, os.environ["T76F_SCRIPTS"])
+sys.executable = "/usr/bin/true"
+import diagnose
+assert diagnose.toml_python() is None, diagnose.toml_python()' 2>/dev/null; then
+    ok_msg "a sys.executable that exits 0 without running Python is not picked"
+  else fail_msg "detection picked a non-Python sys.executable"; fi
+else
+  skip_msg "T76f(d): needs a parser-less Python and /usr/bin/true"
+fi
+cleanup
+
+# ═══════════════════════════════════════════════════════════════════════════════
 # T77  fix_plugin_hooks.py — section-scoped idempotent TOML edit
 # ═══════════════════════════════════════════════════════════════════════════════
 section "T77: fix_plugin_hooks.py — replaces, inserts once, leaves other tables alone"

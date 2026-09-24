@@ -35,6 +35,7 @@ real contract; the exit code is a convenience for shell callers).
 from __future__ import annotations
 
 import contextlib
+import functools
 import io
 import json
 import os
@@ -307,7 +308,9 @@ def check_codex_artifacts(enabled: list[str]) -> list[dict]:
         try:
             import tomllib
             tomllib.loads(text)
-        except ModuleNotFoundError:
+        except ImportError:
+            # No usable parser (absent, or present but broken): skip the parse
+            # check rather than report a valid config as invalid TOML.
             pass
         except Exception as exc:  # noqa: BLE001
             toml_error = str(exc)
@@ -1026,8 +1029,8 @@ def plugin_hooks_enabled(config_text: str) -> bool:
     try:
         import tomllib
         parsed = tomllib.loads(config_text)
-    except ModuleNotFoundError:
-        # No tomllib (pre-3.11): tolerate the header/assignment spellings TOML
+    except ImportError:
+        # No usable tomllib (pre-3.11, or broken): tolerate the header/assignment spellings TOML
         # allows — internal whitespace and trailing comments — instead of the
         # exact-match scan that misdiagnosed valid configs the fixer accepts.
         in_features = False
@@ -1042,6 +1045,42 @@ def plugin_hooks_enabled(config_text: str) -> bool:
         return False
     features = parsed.get("features")
     return isinstance(features, dict) and features.get("plugin_hooks") is True
+
+
+_TOML_PROBE_OK = "cc-suite-toml-parser-ok"
+_TOML_IMPORT_PROBE = (
+    "try:\n    import tomllib\nexcept ImportError:\n    import tomli\n"
+    f"print({_TOML_PROBE_OK!r})\n"
+)
+
+
+@functools.lru_cache(maxsize=1)
+def toml_python() -> str | None:
+    """A Python interpreter that can actually import a TOML parser, or None.
+
+    fix_plugin_hooks.py refuses to write a config it cannot parse back, so its
+    auto-fix must run on an interpreter with tomllib (3.11+) or tomli. diagnose
+    itself is launched as `python3`, which is 3.9 on stock macOS, so its own
+    interpreter is only the first candidate. Each candidate is probed by really
+    importing the parser: a module that exists but is broken does not count, and
+    only an interpreter that prints the probe's marker counts — a non-Python
+    host that exits 0 on anything (a possible sys.executable when embedded) is
+    not mistaken for one.
+    """
+    seen = set()
+    for name in (sys.executable, "python3.13", "python3.12", "python3.11", "python3"):
+        path = name if os.path.isabs(name) else shutil.which(name)
+        if not path or path in seen:
+            continue
+        seen.add(path)
+        try:
+            probe = subprocess.run([path, "-c", _TOML_IMPORT_PROBE],
+                                   capture_output=True, text=True, timeout=10)
+        except (OSError, subprocess.TimeoutExpired):
+            continue
+        if probe.returncode == 0 and probe.stdout.strip() == _TOML_PROBE_OK:
+            return path
+    return None
 
 
 def check_codex_runtime(enabled: list[str]) -> list[dict]:
@@ -1083,9 +1122,21 @@ def check_codex_runtime(enabled: list[str]) -> list[dict]:
     if plugin_hooks_enabled(text):
         out.append(check("plugin_hooks", "plugin_hooks", "healthy", "enabled in ~/.codex/config.toml"))
     else:
-        out.append(check("plugin_hooks", "plugin_hooks", "issue",
-                         "not set — plugin-bundled Codex hooks are inert",
-                         auto=[f"python3 {script('fix_plugin_hooks.py')}"]))
+        fixer_python = toml_python()
+        if fixer_python:
+            out.append(check("plugin_hooks", "plugin_hooks", "issue",
+                             "not set — plugin-bundled Codex hooks are inert",
+                             auto=[f"{shlex.quote(fixer_python)} {script('fix_plugin_hooks.py')}"]))
+        else:
+            # Offering `python3 fix_plugin_hooks.py` here would be an auto-fix
+            # that is certain to refuse; say what to do instead.
+            out.append(check("plugin_hooks", "plugin_hooks", "issue",
+                             "not set — plugin-bundled Codex hooks are inert",
+                             manual="no Python that can import tomllib or tomli was found "
+                                    "(tomllib needs Python 3.11+), so the fixer cannot verify "
+                                    "its edit; add `plugin_hooks = true` under `[features]` in "
+                                    "~/.codex/config.toml by hand, or install Python 3.11+ and "
+                                    "re-run /cc-suite:diagnose"))
     return out
 
 
