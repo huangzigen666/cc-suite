@@ -1,6 +1,6 @@
 # cc-suite / rex-lang-bridge 本机接入验收
 
-范围：`/Users/huanghao/Developer/cc-suite`、当前安装的 cc-suite 2.5.4、本机 rex-lang-bridge 0.1.0 的代码 overlay，以及 23 个现有 Skill 根。分支 `feat/rex-lang-bridge-delegation-20261012`；不发布 marketplace，不推送 GitHub，不写只读同步知识源，Hermes 不解冻。
+范围：`/Users/huanghao/Developer/cc-suite`、当前安装的 cc-suite 2.5.4、本机 rex-lang-bridge 0.1.0 的代码 overlay，以及 23 个现有 Skill 根。初始阶段使用分支 `feat/rex-lang-bridge-delegation-20261012`，当时仅本机接入。用户随后授权 GitHub 留存及合并 `huangzigen666/cc-suite` 的 `main`；按仓库版本规则准备 `v2.6.0`。不写只读同步知识源，Hermes 不解冻。
 
 ## 事前判断与判别检查
 
@@ -34,4 +34,4 @@
 
 本机变更 receipt：`/Users/huanghao/.local/state/cc-suite-lang-bridge/20261011211222200/receipt.json`；MCP 生成器补齐 receipt：`/Users/huanghao/.local/state/cc-suite-lang-bridge/20261011211840372/receipt.json`。其中记录每个目标、前后哈希与同目录 `.bak`。需要回滚时逆序处理两次 receipt，先确认当前哈希仍等于 after_sha256，再用同目录临时文件校验后恢复快照。只移除 receipt 中新增且仍指向预期目标的链接；保留既有链接、其他用户改动及冻结状态。
 
-此交付为本机 overlay，cc-suite 插件身份保持 2.5.4，rex-lang-bridge 插件身份保持 0.1.0；共享 Skill 单独记录 v0.2.0-local。上游安装/更新可能覆盖 overlay；更新后先执行 `node scripts/sync-lang-bridge.mjs --plan`，基线不兼容时停止，不静默套用。
+此前已验收的本机 overlay 保持 cc-suite 插件身份 2.5.4；本次仓库合并将 package、plugin 与 fork marketplace 版本同步为 2.6.0，不自动重装本机插件。rex-lang-bridge 插件身份保持 0.1.0；共享 Skill 单独记录 v0.2.0-local。`scripts/sync-lang-bridge.mjs` 的 2.5.4 检查仍是本机 overlay 的安全基线，不表示发布版本。上游安装/更新可能覆盖 overlay；更新后先执行 `node scripts/sync-lang-bridge.mjs --plan`，基线不兼容时停止，不静默套用。
