@@ -18,6 +18,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent / "lib"))
 from pin import PinError, read_pin as read_validated_pin  # noqa: E402
+from prompt_bridge import claude_transport, is_claude_transport  # noqa: E402
 
 
 SCHEMA = 1
@@ -98,8 +99,7 @@ def claude_code_server() -> dict:
         raise SystemExit(2)
     return {
         "type": "stdio",
-        "command": "npx",
-        "args": ["-y", f"claude-octopus@{pin}"],
+        **claude_transport(pin),
         "env": {},
     }
 
@@ -113,17 +113,7 @@ def is_delegation_package(config: object) -> bool:
     npx — the same program, possibly at a different version or with the optional
     keys left at their defaults. Mirrors bridge_tools._is_delegation_package so
     the two bridges reserve the name on identical terms."""
-    if not isinstance(config, dict):
-        return False
-    args = config.get("args")
-    if not isinstance(args, list):
-        return False
-    return (
-        config.get("type", "stdio") == "stdio"
-        and config.get("command") == "npx"
-        and any(isinstance(a, str) and (a == "claude-octopus" or a.startswith("claude-octopus@"))
-                for a in args)
-    )
+    return is_claude_transport(config)
 
 
 def apply_delegation_reservation(desired: dict[str, dict]) -> dict[str, dict]:

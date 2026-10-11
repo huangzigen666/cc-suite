@@ -26,6 +26,7 @@ import {
 import { createTextDecoder, finalizedOutcome } from "./lib/runner-lifecycle.mjs";
 import { readProcessStartTime } from "./lib/process.mjs";
 import { withDelegationBoundary } from "./lib/delegation-boundary.mjs";
+import { prepareDelegation } from "./lib/prompt-bridge.mjs";
 import {
   JsonlDecoder,
   QwenStreamError,
@@ -686,6 +687,7 @@ function executeQwenAttempt(cwd, args, targets, logFile, attempt, resumeId, prom
 }
 
 async function executeQwen(cwd, args, targets, integrityTargets, logFile) {
+  await prepareDelegation(cwd, args, logFile, appendLog);
   const jobStarted = Date.now();
   let resumeId = null;
   let prompt = args.prompt;

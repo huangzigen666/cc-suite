@@ -31,6 +31,10 @@ By default this skill runs **non-interactively**: fixes **all** findings, and st
 
 ## Workflow
 
+Before each fresh or reply MCP call, follow the prompt bridge instructions in
+`../../../commands/shared/claude-prompt-bridge.md`. Use its returned `prompt`;
+keep all tools, permissions, scope and response-format arguments unchanged.
+
 ### Step 1: Audit (Claude)
 
 Call `claude_code` following the `$audit` skill pattern.

@@ -49,6 +49,7 @@ from typing import Any, Dict, List, Tuple
 
 sys.path.insert(0, str(Path(__file__).resolve().parent / "lib"))
 from pin import PinError, read_pin as read_validated_pin  # noqa: E402
+from prompt_bridge import claude_transport  # noqa: E402
 
 # ── locations ────────────────────────────────────────────────────────────────
 AGENT_DIR = Path(".cc-suite/agents")
@@ -499,8 +500,7 @@ def plan_mcp_json(agents: List[Dict[str, Any]], pin: str) -> Tuple[str, List[str
         servers[name] = {
             MARKER_KEY: name,
             "type": "stdio",
-            "command": "npx",
-            "args": ["-y", f"claude-octopus@{pin}"],
+            **claude_transport(pin),
             "env": agent_to_env(agent),
         }
 
@@ -601,8 +601,8 @@ def plan_codex_toml(agents: List[Dict[str, Any]], pin: str) -> Tuple[str, List[s
         block = (
             f"{SENTINEL_OPEN}{name} >>>\n"
             f"[mcp_servers.{_toml_quote_key(name)}]\n"
-            f'command = "npx"\n'
-            f'args    = ["-y", "claude-octopus@{pin}"]\n'
+            f'command = "node"\n'
+            f'args    = {json.dumps(claude_transport(pin)["args"])}\n'
             f"startup_timeout_sec = 60\n"
             f"tool_timeout_sec    = 900\n"
             f"[mcp_servers.{_toml_quote_key(name)}.env]\n"

@@ -80,8 +80,8 @@ PIN_MARKER="claude-octopus@${CC_SUITE_CLAUDE_MCP_VERSION}"
 BLOCK="$(cat <<TOML
 ${SENTINEL_OPEN}
 [mcp_servers.claude-code]
-command = "npx"
-args    = ["-y", "${PIN_MARKER}"]
+command = "node"
+args    = ["${SCRIPT_DIR}/claude-mcp-bridge.mjs", "--", "npx", "-y", "${PIN_MARKER}"]
 env     = {}
 # Codex default tool_timeout_sec is too short for claude_code calls: a
 # single multi-turn agent invocation can run several minutes, so 900s

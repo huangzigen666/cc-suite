@@ -16,6 +16,10 @@ Ask Claude Code to reason through a task and return a concrete implementation pl
 
 ## Call Pattern
 
+Before each fresh or reply MCP call, follow the prompt bridge instructions in
+`../../../commands/shared/claude-prompt-bridge.md`. Use its returned `prompt`;
+keep all tools, permissions, scope and response-format arguments unchanged.
+
 ### Step 1: Request a plan
 
 ```

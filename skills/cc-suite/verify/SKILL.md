@@ -23,6 +23,10 @@ Ask Claude Code to check whether previously reported audit findings have been re
 
 ## Call Pattern
 
+Before each fresh or reply MCP call, follow the prompt bridge instructions in
+`../../../commands/shared/claude-prompt-bridge.md`. Use its returned `prompt`;
+keep all tools, permissions, scope and response-format arguments unchanged.
+
 ### Option A: Continue the audit session (preferred)
 
 If `{audit_session_id}` is available from a prior `$audit` or `$audit-fix` run:

@@ -44,6 +44,7 @@ sys.path.insert(0, str(SCRIPT_DIR / "lib"))
 
 from md_sections import strip_fenced_blocks  # noqa: E402
 from pin import PinError, read_pin  # noqa: E402
+from prompt_bridge import claude_transport, is_claude_transport  # noqa: E402
 
 PIN_FILE = SCRIPT_DIR / "lib" / "claude-octopus-pin.txt"
 ROOT = Path.cwd()
@@ -346,13 +347,7 @@ def _is_delegation_package(config: dict) -> bool:
     """True when a source entry under the reserved name really is claude-octopus
     over npx — the same server, possibly at a different version. Anything else
     wearing that name is a different program and a genuine collision."""
-    args = config.get("args") or []
-    return (
-        config.get("type", "stdio") == "stdio"
-        and config.get("command") == "npx"
-        and any(isinstance(a, str) and (a == "claude-octopus" or a.startswith("claude-octopus@"))
-                for a in args)
-    )
+    return is_claude_transport(config)
 
 
 def desired_servers() -> dict[str, dict]:
@@ -367,12 +362,13 @@ def desired_servers() -> dict[str, dict]:
         elif _valid_server_shape(name, config):
             result[name] = copy.deepcopy(config)
     pin = claude_octopus_pin()
-    args = ["-y", f"claude-octopus@{pin}"]
+    transport = claude_transport(pin)
+    args = transport["args"]
     # `claude-code` is reserved: every bridged tool delegates through it, so a
     # differently-defined source entry must not silently take its place.
     existing = result.get(DELEGATION_SERVER)
     if existing is None:
-        result[DELEGATION_SERVER] = {"type": "stdio", "command": "npx", "args": args, "env": {}}
+        result[DELEGATION_SERVER] = {"type": "stdio", **transport, "env": {}}
     elif not _is_delegation_package(existing):
         err(
             f".mcp.json defines {DELEGATION_SERVER!r} as something other than the pinned "
@@ -384,6 +380,7 @@ def desired_servers() -> dict[str, dict]:
         warn(f"{DELEGATION_SERVER}: .mcp.json runs a different claude-octopus spec — "
              f"mirroring the cc-suite pin {pin}")
         existing["args"] = args
+        existing["command"] = transport["command"]
     return result
 
 

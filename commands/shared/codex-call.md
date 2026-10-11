@@ -7,6 +7,12 @@ user-invocable: false
 
 ## Codex Call Pattern
 
+The runner automatically calls `rex-lang-bridge` for Chinese delegation payloads,
+retains the original task, and adds a quoted English reference. Do not translate
+the task again or append Chinese-summary instructions to internal JSON results.
+Bridge failures report a status and retain the original; the existing deadline
+and sandbox still apply.
+
 All Codex calls go through the CLI runner (`scripts/codex-runner.mjs`), which shells out to `codex exec`. The MCP bridge (`mcp__codex-cli__codex`) is **not** used — it has no controllable timeout and hangs on long single responses (the source of `[Tool result missing due to internal error]`). The runner is killable, deadline-bounded, streams a heartbeat to the job log, and registers every call as a job for `/status` / `/cancel`.
 
 > **No availability ping.** Do not pre-probe Codex. The first real runner call either completes or fails fast (the runner returns within its deadline, and a missing `codex` binary errors in seconds). On any non-`completed` status, go straight to the calling command's **Fallback** section.

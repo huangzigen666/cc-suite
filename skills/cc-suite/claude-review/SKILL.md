@@ -16,6 +16,10 @@ Delegate a code review to Claude Code and get back structured findings.
 
 ## Call Pattern
 
+Before each fresh or reply MCP call, follow the prompt bridge instructions in
+`../../../commands/shared/claude-prompt-bridge.md`. Use its returned `prompt`;
+keep all tools, permissions, scope and response-format arguments unchanged.
+
 ### Step 1: Start a review
 
 Call `claude_code` with a structured review prompt:

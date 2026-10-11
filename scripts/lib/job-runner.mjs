@@ -28,6 +28,7 @@ import {
 } from "./state.mjs";
 import { resolveWorkspaceRoot } from "./workspace.mjs";
 import { finalizedOutcome, runnerIdentity } from "./runner-lifecycle.mjs";
+import { prepareDelegation } from "./prompt-bridge.mjs";
 
 // Job id this process registered but has not finalized or handed to a
 // detached worker; the crash handler fails it.
@@ -82,6 +83,7 @@ async function runForeground(cwd, args, spec) {
   });
   appendLog(logFile, `Starting ${args.kind} task (foreground, backend=${spec.label})`);
 
+  await prepareDelegation(cwd, args, logFile, appendLog);
   const result = await spec.execute(cwd, args, logFile);
   const output = commitResult(cwd, jobId, result);
   activeJobId = null;
@@ -148,6 +150,7 @@ async function runBackgroundWorker(cwd, args, jobId, spec) {
   const logFile = createJobLogFile(cwd, jobId);
   appendLog(logFile, `Background worker started (backend=${spec.label})`);
 
+  await prepareDelegation(cwd, args, logFile, appendLog);
   const result = await spec.execute(cwd, args, logFile);
   commitResult(cwd, jobId, result);
 }

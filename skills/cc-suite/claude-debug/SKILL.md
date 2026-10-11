@@ -17,6 +17,10 @@ Delegate a debugging session to Claude Code — Claude traces the root cause and
 
 ## Call Pattern
 
+Before each fresh or reply MCP call, follow the prompt bridge instructions in
+`../../../commands/shared/claude-prompt-bridge.md`. Use its returned `prompt`;
+keep all tools, permissions, scope and response-format arguments unchanged.
+
 ### Step 1: Send the bug report
 
 ```

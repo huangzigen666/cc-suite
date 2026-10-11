@@ -8,6 +8,11 @@ allowed-tools:
 
 # /cc-suite:delegate
 
+Each backend runner automatically bridges Chinese task text through
+`rex-lang-bridge`, preserving the original and the requested output format.
+Already marked text is passed through; translation failure retains the original.
+Do not call `rex-lang-bridge` a second time before a runner call.
+
 Send a prompt to **any** backend in the cc-suite grid through the universal
 delegator. This is the single Claude-facing surface for the whole agent mesh:
 `codex`, `agy`, `grok`, `qwen`, `codebuddy`, `qoder`, `hermes`, `zcode`,

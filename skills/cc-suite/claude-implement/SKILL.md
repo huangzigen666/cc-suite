@@ -16,6 +16,10 @@ Delegate an implementation task to Claude Code — Claude will read files, write
 
 ## Call Pattern
 
+Before each fresh or reply MCP call, follow the prompt bridge instructions in
+`../../../commands/shared/claude-prompt-bridge.md`. Use its returned `prompt`;
+keep all tools, permissions, scope and response-format arguments unchanged.
+
 ### Step 1: Delegate the task
 
 ```

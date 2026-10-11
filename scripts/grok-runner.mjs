@@ -55,6 +55,7 @@ import {
   waitForExit,
 } from "./lib/process.mjs";
 import { withDelegationBoundary } from "./lib/delegation-boundary.mjs";
+import { prepareDelegation } from "./lib/prompt-bridge.mjs";
 
 const DEFAULT_TIMEOUT_MS = 15 * 60 * 1000; // 15 minutes — matches the other runners
 const HEARTBEAT_MS = 30 * 1000;
@@ -183,7 +184,8 @@ function buildGrokArgs(args, alwaysApprove) {
 
 // Drive `grok agent stdio` as an ACP client. Resolves with
 // { status, rawOutput, sessionId, errorMessage }.
-function executeGrok(cwd, args, logFile) {
+async function executeGrok(cwd, args, logFile) {
+  await prepareDelegation(cwd, args, logFile, appendLog);
   return new Promise((resolve) => {
     const alwaysApprove = args.sandbox !== "read-only";
     const grokArgs = buildGrokArgs(args, alwaysApprove);

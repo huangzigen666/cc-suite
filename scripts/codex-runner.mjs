@@ -38,6 +38,7 @@ import {
   waitForExit,
 } from "./lib/process.mjs";
 import { extractErrorEvent, resolveFailureMessage } from "./lib/codex-errors.mjs";
+import { prepareDelegation } from "./lib/prompt-bridge.mjs";
 
 const DEFAULT_TIMEOUT_MS = 15 * 60 * 1000; // 15 minutes
 const HEARTBEAT_MS = 30 * 1000;
@@ -180,7 +181,8 @@ function readLastMessage(file) {
 // Run codex exec asynchronously: stream JSONL to the log (heartbeat), capture
 // the thread id, and enforce a hard deadline by killing the child. Resolves
 // with { status, rawOutput, threadId, errorMessage }.
-function executeCodex(cwd, args, logFile) {
+async function executeCodex(cwd, args, logFile) {
+  await prepareDelegation(cwd, args, logFile, appendLog);
   return new Promise((resolve) => {
     const lastMessageFile = path.join(
       os.tmpdir(),

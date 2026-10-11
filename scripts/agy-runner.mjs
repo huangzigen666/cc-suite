@@ -57,6 +57,7 @@ import {
   waitForExit,
 } from "./lib/process.mjs";
 import { withDelegationBoundary } from "./lib/delegation-boundary.mjs";
+import { prepareDelegation } from "./lib/prompt-bridge.mjs";
 
 const DEFAULT_TIMEOUT_MS = 15 * 60 * 1000; // 15 minutes — matches codex-runner
 const HEARTBEAT_MS = 30 * 1000;
@@ -256,7 +257,8 @@ function buildAgyArgs(args) {
 // Run agy asynchronously: accumulate stdout (which IS the answer), heartbeat
 // into the job log, and enforce a hard deadline by killing the child.
 // Resolves with { status, rawOutput, conversationId, errorMessage }.
-function executeAgy(cwd, args, logFile) {
+async function executeAgy(cwd, args, logFile) {
+  await prepareDelegation(cwd, args, logFile, appendLog);
   return new Promise((resolve) => {
     const agyArgs = buildAgyArgs(args);
     const before = args.resume ? null : snapshotConversations();
